@@ -4,11 +4,46 @@ import numpy as np
 from itertools import cycle
 from skimage.color import label2rgb, rgb2gray
 from skimage.segmentation import find_boundaries
+from skimage.measure import regionprops_table
 
 from matplotlib.colors import ListedColormap
 from matplotlib.offsetbox import TextArea, AnnotationBbox
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 
+import pandas as pd
+
+_CLASS_COLORS = {
+    "Ra": "dimgrey",
+    "Rb01": "darkorange",
+    "Rb02": "sandybrown",
+    "Rc": "lightblue",
+    "Rcu01": "yellow",
+    "Ru01": "ivory",
+    "Ru02": "slateblue",
+    "Ru03": "lightgrey",
+    "Ru04": "peru",
+    "Ru05": "pink",
+    "Ru06": "slategrey",
+    "Rg": "limegreen",
+    "X01": "burlywood",
+    "X02": "lightblue",
+    "X03": "red",
+    "X04": "tan",
+    "UNKNOWN": "violet",
+    "Coin": "gold",
+}
+
+_EN93311_COLORS = {
+    "Ra": "dimgrey",
+    "Rb": "darkorange",
+    "Rc": "lightblue",
+    "Rg": "limegreen",
+    "Ru": "ivory",
+    "X": "red",
+    "UNKNOWN": "violet",
+    "Coin": "gold",
+}
 
 _COLORS = (
     np.array(
@@ -238,14 +273,19 @@ def draw_instances(
     labeled_masks,
     cls_ids,
     cls_scores=None,
-    class_ids_to_name=None,
+    bboxes=None,
     draw_boundaries=True,
-    show=True,
+    showtext=True,
+    drawrect=False,
+    mode="instance",
     colors=None,
-    fontscale=5,
     fontcolor=(0, 0, 0),
     alpha=0.5,
-    thickness=1,
+    thickness=2,
+    fontscale=1,
+    fontface=cv2.FONT_HERSHEY_DUPLEX,
+    padding=5,
+    boundary_mode="inner",
 ):
     """draw masks with class labels and probabilities using opencv
     inputs:
@@ -261,66 +301,121 @@ def draw_instances(
         annotated image (RGB image as uint8 np.array)
 
     """
+    assert mode in ["instance", "class"], "mode must be either 'instance' or 'class' "
+
+    # Set colormap
+    if mode == "class" and cls_ids is None:
+        print("You must provide the class ids when mode == 'class'. Switching to instance mode")
+        mode = "instance"
+
     if colors is None:
-        colors = _COLORS
+        if mode == "class":
+            colors = [[0, 0, 0]]  # add for bg
+            colors.extend([mpl.colors.to_rgb(_CLASS_COLORS[key]) for key in cls_ids])
+            colors = 255 * np.array(colors)
 
-    nx, ny = labeled_masks.shape
+        else:
+            colors = np.zeros((_COLORS.shape[0] + 1, 3))
+            colors[1:,] = 255 * _COLORS
 
-    img = cv2.resize(image, (ny, nx), interpolation=cv2.INTER_LINEAR)
+    # Convert to BGR
+    colors = colors[:, ::-1].astype(np.uint8)
 
-    output_image = label2rgb(labeled_masks, img, bg_label=0, alpha=alpha, colors=colors)
+    # Resize
+    nx, ny = labeled_masks.shape[:2]
 
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    image = cv2.resize(image, (ny, nx), interpolation=cv2.INTER_LINEAR) * 255
+    image = image.astype(np.uint8)
+
+    # Draw overlay
+    color_overlay = colors[labeled_masks].astype(np.uint8)
+    output_image = image.copy()
+    mask_bool = labeled_masks > 0
+
+    output_image[mask_bool] = cv2.addWeighted(image[mask_bool], 1 - alpha, color_overlay[mask_bool], alpha, 0)
+
+    # Draw Boundaries
     if draw_boundaries:
-        bd = find_boundaries(labeled_masks, connectivity=2, mode="inner", background=0)
-        output_image = np.where(bd[..., np.newaxis], (0, 0, 0), output_image)
+        bd = find_boundaries(labeled_masks, connectivity=2, mode=boundary_mode, background=0).astype(np.uint8)
+        boundary_mask = bd > 0
+        # Définir ces pixels à la couleur noire [0, 0, 0] dans l'output_image
+        output_image[boundary_mask] = [0, 0, 0]
 
-    if cls_scores is None:
-        cls_scores = np.ones(cls_ids.size)
+    if showtext:
+        # First compute all bouding boxes
+        if bboxes is None:
+            props_table = regionprops_table(labeled_masks, properties=["label", "bbox"])
+            df = pd.DataFrame(props_table)
+            labels = df["label"].values
+            bboxes = df[["bbox-0", "bbox-1", "bbox-2", "bbox-3"]].values
+        else:
+            props_table = regionprops_table(labeled_masks, properties=["label"])
+            df = pd.DataFrame(props_table)
+            labels = df["label"].values
 
-    # Show class names and scores
-    if class_ids_to_name is not None and fontscale > 0:
+        # Place text
+        for i in range(len(bboxes)):
+            ymin, xmin, ymax, xmax = bboxes[i]
+            lab = labels[i]
 
-        colors = cycle(colors)
+            # Préparation du texte
+            if cls_scores is None:
+                classtext = f"{cls_ids[lab - 1]}"
+            else:
+                classtext = f"{cls_ids[lab - 1]}:{cls_scores[lab - 1 ] * 100:.0f}%"
 
-        for i, (class_id, class_score) in enumerate(zip(cls_ids, cls_scores)):
+            current_color = [int(c) for c in colors[lab]]
 
-            current_color = next(colors).tolist()
+            # Calcul de la taille du texte
+            (text_w, text_h), baseline = cv2.getTextSize(classtext, fontface, fontscale, thickness)
 
-            coords = np.where(labeled_masks == i + 1)
+            # positionnement
+            # Tente de placer le texte AU-DESSUS (valeur Y du bas du fond)
+            y_text_bottom = ymin - padding
 
-            yc = np.mean(coords[:, 0])
-            xc = np.mean(coords[:, 1])
+            # Calcul Y de la ligne du haut du fond du texte
+            y_text_top = y_text_bottom - text_h - baseline - padding
 
-            class_name = class_ids_to_name[class_id]
-            classtext = "{}:{:.0f}%".format(class_name, class_score * 100)
-            (text_width, text_height), baseline = cv2.getTextSize(
-                classtext, cv2.FONT_HERSHEY_SIMPLEX, fontscale, thickness
-            )
-            ymin_txt = yc - baseline if yc - baseline - text_height > 0 else yc + text_height
-            ymin_bg = yc - text_height - baseline if yc - text_height - baseline > 0 else yc + text_height + baseline
-            cv2.rectangle(
-                output_image,
-                (xc - text_width // 2, ymin_bg),
-                (xc + text_width // 2, yc),
-                current_color,
-                thickness=cv2.FILLED,
-            )
+            # Vérification si le texte sort par le haut (y < 0)
+            if y_text_top < 0:
+                # Place EN-DESSOUS
+                y_text_top = ymax + padding
+                y_text_bottom = y_text_top + text_h + baseline + padding
+
+                # Si ça sort du bas de l'image, on force l'affichage en haut de l'objet
+                if y_text_bottom > nx:
+                    y_text_top = ymin + padding
+                    y_text_bottom = y_text_top + text_h + baseline + padding
+
+            # Coordonnées du coin supérieur gauche du texte (pour l'alignement)
+            # Aligné à gauche de la boîte englobante
+            x_text_start = xmin
+
+            # Ajustement pour que le texte ne sorte pas à droite de l'image
+            if x_text_start + text_w + 2 * padding > ny:
+                x_text_start = ny - text_w - 2 * padding
+
+            if drawrect:
+                cv2.rectangle(
+                    output_image,
+                    (x_text_start - padding, y_text_top),
+                    (x_text_start + text_w + padding, y_text_bottom),
+                    current_color,
+                    thickness=cv2.FILLED,
+                )
+
             cv2.putText(
                 output_image,
                 classtext,
-                org=(xc - text_width // 2, ymin_txt),
-                fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                org=(x_text_start, y_text_bottom - baseline),
+                fontFace=fontface,
                 fontScale=fontscale,
                 color=fontcolor,
                 thickness=thickness,
             )
 
-    if show:
-        plt.imshow(output_image)
-        plt.show()
-        return output_image
-    else:
-        return np.round(output_image * 255).astype(np.uint8)
+    return cv2.cvtColor(output_image, cv2.COLOR_BGR2RGB)
 
 
 def plot_instances(
@@ -328,6 +423,7 @@ def plot_instances(
     mask,
     cls_ids=None,
     cls_scores=None,
+    mode="instance",
     alpha=0.25,
     box_alpha=0.75,
     fontsize=8,
@@ -343,6 +439,12 @@ def plot_instances(
     """Draw predicted masks onto image, with associated predicted class
     returns a matplotlib figure"""
 
+    assert mode in ["instance", "class"], "mode must be either 'instance' or 'class' "
+
+    if mode == "class" and cls_ids is None:
+        print("You must provide the class ids when mode == 'class'. Switching to instance mode")
+        mode = "instance"
+
     nx, ny = mask.shape[:2]
     labels = np.unique(mask)
     image = cv2.resize(image, (ny, nx), interpolation=cv2.INTER_LINEAR)
@@ -356,10 +458,14 @@ def plot_instances(
     ax.imshow(image)  # , extent = (0, image.shape[1], 0, image.shape[0]))
     masked_mask = np.ma.masked_equal(mask, 0)
 
-    cmap = ListedColormap(_COLORS, N=labels.size)
-    ax.imshow(
-        masked_mask, cmap=cmap, interpolation="nearest", alpha=alpha
-    )  # , extent = (0, image.shape[1], 0, image.shape[0]))
+    if mode == "instance":
+        cmap = ListedColormap(_COLORS, N=labels.size - 1)
+        ax.imshow(
+            masked_mask, cmap=cmap, interpolation="nearest", alpha=alpha
+        )  # , extent = (0, image.shape[1], 0, image.shape[0]))
+    elif mode == "class":
+        colors = [mpl.colors.to_rgb(_CLASS_COLORS[key]) for key in cls_ids]
+        cmap = ListedColormap(colors, N=labels.size - 1)
 
     if cls_ids is not None and cls_scores is not None:
         for i, label in enumerate(labels[1:]):
