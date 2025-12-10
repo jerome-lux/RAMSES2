@@ -1,0 +1,83 @@
+{
+    "load_backbone": false,
+    "backbone_params": {
+        "build_head": true
+    },
+    "backbone": "convnextv2_femto",
+    "backbone_source": "local",
+    "backbone_feature_nodes": {
+        "stages.0": "C2",
+        "stages.1": "C3",
+        "stages.2": "C4",
+        "stages.3": "C5"
+    },
+    "ncls": 15,
+    "imshape": [
+        2048,
+        3072,
+        3
+    ],
+    "mask_stride": 8,
+    "activation": "GELU",
+    "normalization": "LayerNorm2d",
+    "normalization_kw": {
+        "eps": 1e-06
+    },
+    "connection_layers": {
+        "C3": 96,
+        "C4": 192,
+        "C5": 384
+    },
+    "FPN_filters": 256,
+    "extra_FPN_layers": 1,
+    "strides": [
+        8,
+        16,
+        32,
+        64
+    ],
+    "head_layers": 4,
+    "head_filters": 256,
+    "kernel_size": 1,
+    "grid_sizes": [
+        144,
+        72,
+        36,
+        18
+    ],
+    "point_nms": false,
+    "mask_mid_filters": 128,
+    "mask_output_filters": 256,
+    "geom_feat_convs": 4,
+    "geom_feats_filters": 128,
+    "mask_output_level": 0,
+    "FPN_output_upscaling": false,
+    "sigma_nms": 0.5,
+    "min_area": 0,
+    "use_binary_masks": true,
+    "lossweights": [
+        1.0,
+        1.0,
+        1.0
+    ],
+    "max_pos_samples": 768,
+    "scale_ranges": [
+        [
+            1,
+            128
+        ],
+        [
+            64,
+            256
+        ],
+        [
+            128,
+            512
+        ],
+        [
+            256,
+            3072
+        ]
+    ],
+    "offset_factor": 0.75
+}
