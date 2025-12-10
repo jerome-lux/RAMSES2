@@ -1,0 +1,111 @@
+{
+    "licenses": [
+        {
+            "name": "",
+            "id": 0,
+            "url": ""
+        }
+    ],
+    "info": {
+        "contributor": "",
+        "date_created": "",
+        "description": "",
+        "url": "",
+        "version": "",
+        "year": ""
+    },
+    "categories": [
+        {
+            "name": "Ra",
+            "id": 1,
+            "supercategory": ""
+        },
+        {
+            "name": "Rc",
+            "id": 2,
+            "supercategory": ""
+        },
+        {
+            "name": "Rcu01",
+            "id": 3,
+            "supercategory": ""
+        },
+        {
+            "name": "Rb01",
+            "id": 4,
+            "supercategory": ""
+        },
+        {
+            "name": "Rb02",
+            "id": 5,
+            "supercategory": ""
+        },
+        {
+            "name": "Rg",
+            "id": 6,
+            "supercategory": ""
+        },
+        {
+            "name": "Ru01",
+            "id": 7,
+            "supercategory": ""
+        },
+        {
+            "name": "Ru02",
+            "id": 8,
+            "supercategory": ""
+        },
+        {
+            "name": "Ru03",
+            "id": 9,
+            "supercategory": ""
+        },
+        {
+            "name": "Ru04",
+            "id": 10,
+            "supercategory": ""
+        },
+        {
+            "name": "Ru05",
+            "id": 11,
+            "supercategory": ""
+        },
+        {
+            "name": "Ru06",
+            "id": 12,
+            "supercategory": ""
+        },
+        {
+            "name": "X01",
+            "id": 13,
+            "supercategory": ""
+        },
+        {
+            "name": "X02",
+            "id": 14,
+            "supercategory": ""
+        },
+        {
+            "name": "X03",
+            "id": 15,
+            "supercategory": ""
+        },
+        {
+            "name": "X04",
+            "id": 16,
+            "supercategory": ""
+        },
+        {
+            "name": "SHELLS",
+            "id": 17,
+            "supercategory": ""
+        },
+        {
+            "name": "UNKNOWN",
+            "id": 18,
+            "supercategory": ""
+        }
+    ],
+    "images": [],
+    "annotations": []
+}

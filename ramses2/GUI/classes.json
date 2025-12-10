@@ -1,0 +1,62 @@
+{
+    "Ra": {
+        "id": 1,
+        "description": "Granulats bitumineux"
+    },
+    "Rc": {
+        "id": 2,
+        "description": "Granulats béton"
+    },
+    "Rb01": {
+        "id": 3,
+        "description": "Terre cuite"
+    },
+    "Rb02": {
+        "id": 4,
+        "description": "Carrelage, faience, etc."
+    },
+    "Rcu01": {
+        "id": 5,
+        "description": "mortier calcaire"
+    },
+    "Ru01": {
+        "id": 6,
+        "description": "Pierres calcaire"
+    },
+    "Ru02": {
+        "id": 7,
+        "description": "Pierres grises (basalte, diorite, etc.)"
+    },
+    "Ru04": {
+        "id": 8,
+        "description": "Pierres concassés colorées et/ou sombres"
+    },
+    "Ru05": {
+        "id": 9,
+        "description": "Granulats alluvionnaires"
+    },
+    "Ru06": {
+        "id": 10,
+        "description": "Ardoise"
+    },
+    "X01": {
+        "id": 11,
+        "description": "Bois"
+    },
+    "Coin": {
+        "id": 12,
+        "description": "Pièce de 5 centimes"
+    },
+    "X02": {
+        "id": 13,
+        "description": "Plastique"
+    },
+    "X03": {
+        "id": 14,
+        "description": "Aciers"
+    },
+    "Rg": {
+        "id": 15,
+        "description": "Verre"
+    }
+}
