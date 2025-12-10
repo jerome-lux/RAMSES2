@@ -2,10 +2,9 @@
 lang: ENGLISH
 ---
 
-# Recycled Aggregates Mass Estimation and Segmentation RAMSES
+# Recycled Aggregates Mass Estimation and Segmentation: RAMSES
 
-Add mass estimation to SOLOv2  model (Segmenting Objects by LOcations, https://arxiv.org/pdf/2003.10152.pdf)).
-Implemented using tensorflow (tf version must be <2.16, because of changes introduced in keras 3+)
+Add mass estimation to SOLOv2 model (Segmenting Objects by LOcations, https://arxiv.org/pdf/2003.10152.pdf).
 
 ## Creating the model
 
@@ -176,4 +175,4 @@ results = ramses2.predict(
 The function ```ramses2.stream_predict()``` is designed to process an image stream in which aggregates may be truncated or partially visible along the stream direction (the height axis). The function identifies aggregates that are truncated (or split) between two consecutive images. It then reconstructs a single image containing only the complete aggregates by utilizing the overlap region. Ovelap images are created in OUTPUT_FOLDER.
     
 ## GUI
-A small GUI is provided. It predits the composition following the EN 933-11 standard, as well as an estimate of the granulometric curve.
+A small GUI is provided. It allows to predict the composition following the EN 933-11 standard, as well as an estimate of the granulometric curve.
