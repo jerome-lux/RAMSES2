@@ -15,7 +15,8 @@ First, create a config object
 
     config = RAMSES.Config() # default config
 
-You can also customize the config:
+You can also customize the config: see the model/config.py file for all available parameters.
+
     params = {
     # backbone
     load_backbone:checkpoints/convnextv2_femto_1k_224_ema.pt
@@ -81,7 +82,7 @@ The data must be stored in one or (multiple) folders with the following structur
     ├── metadata.json
 ```
 
-Images are stored in the images folder (must be jpg). 
+Images are stored in the images folder. 
 Masks are stored in labels\  folder (should be 1-channel uint16 uncompressed png). They must have the name basename as their corresponding image.
 the `annotations.csv` file must contain at least the following columns:
 
@@ -89,7 +90,7 @@ the `annotations.csv` file must contain at least the following columns:
 label: label of the object in the mask image 
 baseimg: base image name e.g. "IM0001", 
 x0,y0,x1,y1: coordinates of the bounding box corners (in pixels, format x0y0x1y1)
-class: class o fthe object
+class: class of the object
 res: resolution in pixels/mm
 mass: mass in g
 gt_mass: True if ground truth mass (individual measure), False if estimated mass
@@ -103,61 +104,76 @@ A `DatasetGenerator` can be created using the `annotations.csv` file. The `Datas
 
 The attributes `train_basenames` and `valid_basenames` are lists containing the names of the images in the sets. Once it is done the dataset should be saved as a TFRecord file to be used for training.
 
-See `datasetpynb` for an example.
+See `dataset.ipynb` for an example.
 
 ## Training with custom dataset <br>
 
 See `training.ipynb` for an example of model creation and training.
 
 ## Inference
-A call to the model with a [1, H, W, 3] image returns the N masks tensor (one slice per instance [1, N, H/2, W/2]) and corresponding classes [1, N] and scores [1, N] and normalized masses [1, N]. <br>
-The model **ALWAYS** return ragged tensors, and should work with batchsize > 1.
-The final labeled prediction can be obtained by the RAMSES.utils.decode_predictions function
+A call to the model with a [1, 3, H, W] image returns return a dictionnary [{"masks": seg_preds, "scores": scores, "cls_labels": cls_labels_pos, "masses": masses}] where:
+- seg_preds is a tensor of shape [N, H_mask, W_mask] (N the number of predicted instances) 
+- scores, cls_labels_pos and densities are tensors of shape [N]
 
-    default_kwargs = {
-        "score_threshold": 0.5,
-        "seg_threshold": 0.5,
-        "nms_threshold": 0.5,
-        "max_detections": 400,
-        "point_nms": False,
-        "use_binary_masks":True,
-        "min_area": 0,
-    }
+```
+Args:
+x: input image [B, 3, H, W],
+training=False,
+cls_threshold=0.5, # threshold for positive detection
+nms_threshold=0.3, # iou threshold or cls threshold in MatrixNMX
+mask_threshold=0.5,
+max_detections=768,
+scale_by_mask_scores=False, #scale the class score by mask scores
+min_area=32,
+nms_mode="greedy"   # can be "greedy" (default), "soft" or "matrix"
+```
 
-    seg_peds, scores, cls_labels, norm_masses = myRAMSESmodel(input, **default_kwargs)
-    labeled_masks = RAMSES.utils.decode_predictions function(seg_preds, scores, score_threshold=0.5, by_scores=False, )
+The predicted masks can sometimes overlap. To get a labeled image use:
+'''python
+processed_masks = ramses2.decode_predictions(results['masks'], results["scores"], threshold=0.5, by_mask_scores=False)
+'''
 
-Results can be vizualised using the RAMSES.visualization.draw_instances function:
-
-    
-    img = RAMSES.visualization.draw_instances(input, 
-            labeled_masks.numpy(), 
-            cls_ids=cls_labels[0,...].numpy() + 1, 
-            cls_scores=scores[0,...].numpy(), 
-            class_ids_to_name=id_to_cls, 
-            show=True, 
-            fontscale=0., 
-            fontcolor=(0,0,0),
-            alpha=0.5, 
-            thickness=0)
-
-or using matplotlib:
-
-    cls_ids = [idx_to_cls[id + 1] for id in cls_labels|0, ...].numpy()]
-    fig = ISMENet.plot_instances(
-                    input,
-                    labeled_masks.numpy()[0, ...],
-                    cls_ids=cls_ids,
-                    cls_scores=scores.numpy()[0,...],
-                    alpha=0.2,
-                    fontsize=2.5,
-                    fontcolor="black",
-                    draw_boundaries=True,
-                    dpi=300,
-                    show=False,
+To visualize the segmented image:
+```python
+fig = ramses2.plot_instances(
+        image,
+        processed_masks.cpu().detach().numpy(),,
+        cls_ids=pred_cls_labels,
+        cls_scores=pred_scores,
+        alpha=0.4,
+        fontsize=3,
+        fontcolor="black",
+        draw_boundaries=True,
+        boundary_mode="inner",
+        dpi=200,
+        show=False,
+        x_offset=20,
+        y_offset=10,
     )
-    plt.show()
+```
+where image must be [H, W, 3]
 
+To run inference on a series of images use the function
 
-Note that all inputs to this function must have a batch dimension and should be converted to numpy arrays.
+```python
+results = ramses2.predict(
+    output_dir=OUTPUT_DIR,
+    input_size=imshape,
+    resolution=28.7,
+    input_dir=INPUT_DIR,
+    model=model,
+    idx_to_cls=idx_to_cls,
+    thresholds=(0.5, 0.5, 0.25),
+    crop_to_ar=True,
+    max_detections=768,
+    minarea=8,
+    subdirs=False,
+    save_imgs="class",
+    device="cuda:0",
+)
+```
+
+The function ```ramses2.stream_predict()``` is designed to process an image stream in which aggregates may be truncated or partially visible along the stream direction (the height axis). The function identifies aggregates that are truncated (or split) between two consecutive images. It then reconstructs a single image containing only the complete aggregates by utilizing the overlap region. Ovelap images are created in OUTPUT_FOLDER.
     
+## GUI
+A small GUI is provided. It predits the composition following the EN 933-11 standard, as well as an estimate of the granulometric curve.
