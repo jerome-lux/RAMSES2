@@ -8,10 +8,11 @@ import pandas
 import numpy as np
 import scipy
 import skimage as sk
+import cv2
 from skimage.color import label2rgb
 from skimage.measure import find_contours, approximate_polygon, regionprops
-from ..utils.visualization import _COLORS
-from ..utils import crop_to_aspect_ratio, pad_to_aspect_ratio, decode_predictions
+from ..utils.visualization import _COLORS, plot_instances
+from ..utils import crop_to_aspect_ratio, pad_to_aspect_ratio, decode_predictions, draw_instances, relabel_and_filter
 from ..model import Config, RAMSESModel
 from scipy.ndimage import distance_transform_edt
 import torch
@@ -77,11 +78,13 @@ def predict(
     idx_to_cls,
     thresholds=(0.5, 0.5, 0.5),
     crop_to_ar=True,
+    create_coco_anns=False,
     max_detections=400,
     minarea=64,
     subdirs=False,
-    save_imgs=True,
+    save_imgs="class",
     device="cuda:0",
+    **kwargs,
 ):
     """Instance segmentation + mass estimation on an image or a series of images.
 
@@ -90,7 +93,7 @@ def predict(
     input_size: input size of the network. image will be padded/cropped and resized to input_shape
     output_dir: where to put teh results
     model: pytorch model
-    resolution: res of the input images
+    resolution: res of the input images [MUST be the same for all images!]
     thresholds: a list of thresolds: (t1, t2, t3)
         {"score_threshold": 0.5, "seg_threshold": 0.5, "nms_threshold": 0.6}
     crop_to_ar: wether to crop before resizing the image to input_size. If false, the image is padded.
@@ -110,21 +113,22 @@ def predict(
     - individual instances in output_dir/crops folder
 
     """
-    categories = [{"id": k, "name": v, "supercategory": "RA"} for k, v in idx_to_cls.items()]
-    coco = {
-        "licenses": [{"name": "", "id": 0, "url": ""}],
-        "info": {
-            "contributor": "",
-            "date_created": "",
-            "description": str(input_dir),
-            "url": "",
-            "version": "",
-            "year": "",
-        },
-        "categories": categories,
-        "images": [],
-        "annotations": [],
-    }
+    if create_coco_anns:
+        categories = [{"id": k, "name": v, "supercategory": "RA"} for k, v in idx_to_cls.items()]
+        coco = {
+            "licenses": [{"name": "", "id": 0, "url": ""}],
+            "info": {
+                "contributor": "",
+                "date_created": "",
+                "description": str(input_dir),
+                "url": "",
+                "version": "",
+                "year": "",
+            },
+            "categories": categories,
+            "images": [],
+            "annotations": [],
+        }
 
     # Retrieve images (either in the input dir only or also in all the subdirectiories)
     img_dict = {}
@@ -167,7 +171,8 @@ def predict(
         "mass": [],
         "axis_major_length": [],
         "axis_minor_length": [],
-        "feret_diameter_max": [],
+        "max_feret_diameter": [],
+        "min_feret_diameter": [],
         "max_inscribed_radius": [],
     }
 
@@ -211,16 +216,17 @@ def predict(
         inv_ratio = fullsize_nx / resized_image.shape[0]  # > 1
 
         img_counter += 1
-        coco["images"].append(
-            {
-                "file_name": imgname,
-                "coco_url": "",
-                "height": PILimg.height,
-                "width": PILimg.width,
-                "date_captured": "",
-                "id": img_counter,
-            }
-        )
+        if create_coco_anns:
+            coco["images"].append(
+                {
+                    "file_name": imgname,
+                    "coco_url": "",
+                    "height": PILimg.height,
+                    "width": PILimg.width,
+                    "date_captured": "",
+                    "id": img_counter,
+                }
+            )
 
         resized_image = torch.from_numpy(resized_image.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).float()
         resized_image = resized_image.to(device)
@@ -239,65 +245,92 @@ def predict(
         )[
             0
         ]  # take the first element of the batch (because batch size = 1 here)
-
+        # TODO: pb si un mask est supprimé lors de decode_prediction > il faut relabeliser pour obtenir une liste d'entiers consécutifs
         pred_masks = results["masks"].detach()  # [Npred, H, W]
         pred_masses = results["masses"].detach()  # [Npred]
         pred_cls_ids = results["cls_labels"].detach() + 1  # [Npred]
         pred_scores = results["scores"].detach()  # [Npred]
         # get labeled image: [H, W]
-        labeled_image = decode_predictions(results["masks"], results["scores"], threshold=0.5, by_mask_scores=False)
-        final_labels = torch.unique(labeled_image)[1:] - 1  # skipping 0
+        labeled_image = decode_predictions(pred_masks, pred_scores, threshold=0.5, by_mask_scores=False)
+        pred_labels = torch.unique(labeled_image)[1:] - 1  # skipping 0
         labeled_image = labeled_image.cpu().numpy().astype(int)
 
         if pred_scores.numel() <= 0:  # No detection !
             print("...OK. No instance detected !")
             continue
 
-        # some slices may be empty -> all pixel values are < seg_threshold
-        if torch.numel(final_labels) != torch.numel(pred_cls_ids):
-            pred_scores = pred_scores[final_labels]
-            pred_cls_ids = pred_cls_ids[final_labels]
-            pred_masses = pred_masses[final_labels]
-
         # mask is usually smaller than input_size.
         # We compute the actual downsampling from the input image size to get the resolution and extract the unpadded mask
-        mask_stride = nx // labeled_image.shape[0]
-        res_ratio = (nx // mask_stride) / fullsize_nx
-        scaling = (10 * resolution * res_ratio) ** 2
-        pred_masses = pred_masses.cpu().numpy() / scaling
 
         # Resize to input size (not fullsize because it's too big!)
         image_for_vizualization = resized_image[0].permute(1, 2, 0).cpu().numpy()
         resized_labeled_image = sk.transform.resize(labeled_image, (nx, ny), order=0)
 
         # Extract regions on full size image
-        region_properties = regionprops(resized_labeled_image, extra_properties=(max_inscribed_radius_func,))
-        labels = np.array([prop["label"] for prop in region_properties])
+        region_properties = regionprops(
+            resized_labeled_image,
+            extra_properties=(
+                min_feret_diameter_func,
+                max_inscribed_radius_func,
+            ),
+        )
+        final_labels = np.array([prop["label"] for prop in region_properties])
+        final_indexes = final_labels - 1
+        # some slices may be empty when all pixel values are < seg_threshold or when a mask is over another
+        if final_labels.size != torch.numel(pred_cls_ids):
+            pred_scores = pred_scores[final_indexes]
+            pred_cls_ids = pred_cls_ids[final_indexes]
+            pred_masses = pred_masses[final_indexes]
 
-        if labels.size != pred_cls_ids.numel():
-            print(labels.size, pred_cls_ids.size)
+        if np.max(final_labels) > torch.numel(pred_cls_ids):
+            resized_labeled_image, final_labels, (pred_scores, pred_cls_ids, pred_masses) = relabel_and_filter(
+                torch.from_numpy(resized_labeled_image),
+                torch.from_numpy(final_labels),
+                pred_scores,
+                pred_cls_ids,
+                pred_masses,
+            )
+            resized_labeled_image = resized_labeled_image.numpy()
+            final_labels = final_labels.numpy()
+
+        mask_stride = nx // labeled_image.shape[0]
+        res_ratio = (nx // mask_stride) / fullsize_nx
+        scaling = (10 * resolution * res_ratio) ** 2
+        pred_masses = pred_masses.cpu().numpy() / scaling
+
+        if final_labels.size != pred_cls_ids.numel():
+            print(final_labels.size, pred_cls_ids.size)
             print("WARNING: number of detected regions is not the same as number of predicted instances")
 
-        boxes = np.array([prop["bbox"] for prop in region_properties])
+        boxes = np.array([prop["bbox"] for prop in region_properties])  # box coords in the resized image nx * ny
+        scaled_boxes = np.around(boxes * inv_ratio).astype(int)  # box coords in the original image
 
         # Saving props (scaled to original image size in pixels)
         area = [prop["area"] * inv_ratio**2 for prop in region_properties]
-        axis_major_length = [int(np.around(prop["axis_major_length"] * inv_ratio)) for prop in region_properties]
-        axis_minor_length = [int(np.around(prop["axis_minor_length"] * inv_ratio)) for prop in region_properties]
-        feret_diameter_max = [int(np.around(prop["feret_diameter_max"] * inv_ratio)) for prop in region_properties]
-        max_inscribed_radius = [
-            int(np.around(prop["max_inscribed_radius_func"] * inv_ratio)) for prop in region_properties
-        ]
+        axis_major_length = [prop["axis_major_length"] * inv_ratio for prop in region_properties]
+        axis_minor_length = [prop["axis_minor_length"] * inv_ratio for prop in region_properties]
+        max_feret_diameter = [prop["feret_diameter_max"] * inv_ratio for prop in region_properties]
+        min_feret_diameter = [prop["min_feret_diameter_func"] * inv_ratio for prop in region_properties]
+        max_inscribed_radius = [prop["max_inscribed_radius_func"] * inv_ratio for prop in region_properties]
 
+        data["baseimg"].extend([imgname] * final_labels.size)
+        data["label"].extend(final_labels.tolist())
+        data["res"].extend([resolution] * final_labels.size)
+        data["x0"].extend(scaled_boxes[:, 0].tolist())
+        data["x1"].extend(scaled_boxes[:, 2].tolist())
+        data["y0"].extend(scaled_boxes[:, 1].tolist())
+        data["y1"].extend(scaled_boxes[:, 3].tolist())
         data["area"].extend(area)
         data["axis_major_length"].extend(axis_major_length)
         data["axis_minor_length"].extend(axis_minor_length)
-        data["feret_diameter_max"].extend(feret_diameter_max)
+        data["max_feret_diameter"].extend(max_feret_diameter)
+        data["min_feret_diameter"].extend(min_feret_diameter)
         data["max_inscribed_radius"].extend(max_inscribed_radius)
         data["mass"].extend(pred_masses.tolist())
-        data["class"].extend(pred_cls_ids.tolist())
+        pred_cls_names = [idx_to_cls.get(x, "UNKNOWN") for x in pred_cls_ids.tolist()]
+        data["class"].extend(pred_cls_names)
 
-        if save_imgs:
+        if save_imgs == "labels":
             # resize masks and image for vizualisation
             vizuname = "VIZU-{}.jpg".format(os.path.splitext(imgname)[0])
             bd = sk.segmentation.find_boundaries(resized_labeled_image, connectivity=2, mode="inner", background=0)
@@ -307,43 +340,60 @@ def predict(
             vizu = np.where(bd[..., np.newaxis], (0, 0, 0), vizu)
             vizu = np.around(255 * vizu).astype(np.uint8)
             Image.fromarray(vizu).save(os.path.join(VIZU_DIR, vizuname))
-
-        print(f"...OK. Found {len(labels)} instances. ")
-
-        cocoboxes = box_to_coco(boxes)
-
-        # saving coco instance data
-        for i, prop in enumerate(region_properties):
-
-            box = prop["bbox"]
-
-            data["baseimg"].append(imgname)
-            data["label"].append(labels[i])
-            data["res"].append(resolution)
-            data["x0"].append(box[0])
-            data["x1"].append(box[2])
-            data["y0"].append(box[1])
-            data["y1"].append(box[3])
-
-            # Create COCO annotation
-            polys = binary_mask_to_polygon(
-                prop["image"],
-                level=0.5,
-                x_offset=cocoboxes[i, 0],
-                y_offset=cocoboxes[i, 1],
+        elif save_imgs == "class":
+            vizu = draw_instances(
+                image_for_vizualization,
+                resized_labeled_image,
+                pred_cls_names,
+                bboxes=boxes,
+                draw_boundaries=True,
+                showtext=True,
+                drawrect=True,
+                mode="class",
+                alpha=0.3,
+                boundary_mode=kwargs.get("boundary_mode", "inner"),
+                fontscale=kwargs.get("fontscale", 2),
             )
+            vizuname = "VIZU-{}.jpg".format(os.path.splitext(imgname)[0])
+            Image.fromarray(vizu).save(os.path.join(VIZU_DIR, vizuname), quality=95)
 
-            coco["annotations"].append(
-                {
-                    "segmentation": polys,
-                    "area": int(data["area"][i]),
-                    "iscrowd": 0,
-                    "image_id": img_counter,
-                    "bbox": [int(b) for b in cocoboxes[i]],
-                    "category_id": int(pred_cls_ids[i]),
-                    "id": i,
-                }
-            )
+        print(f"...OK. Found {final_labels.size} instances. ")
+
+        if create_coco_anns:
+            cocoboxes = box_to_coco(boxes)
+
+            # saving coco instance data
+            for i, prop in enumerate(region_properties):
+
+                box = prop["bbox"]
+
+                data["baseimg"].append(imgname)
+                data["label"].append(labels[i])
+                data["res"].append(resolution)
+                data["x0"].append(box[0])
+                data["x1"].append(box[2])
+                data["y0"].append(box[1])
+                data["y1"].append(box[3])
+
+                # Create COCO annotation
+                polys = binary_mask_to_polygon(
+                    prop["image"],
+                    level=0.5,
+                    x_offset=cocoboxes[i, 0],
+                    y_offset=cocoboxes[i, 1],
+                )
+
+                coco["annotations"].append(
+                    {
+                        "segmentation": polys,
+                        "area": int(data["area"][i]),
+                        "iscrowd": 0,
+                        "image_id": img_counter,
+                        "bbox": [int(b) for b in cocoboxes[i]],
+                        "category_id": int(pred_cls_ids[i]),
+                        "id": i,
+                    }
+                )
 
         # Save labels
         labelname = "{}.png".format(os.path.splitext(imgname)[0])
@@ -353,18 +403,15 @@ def predict(
     #    with open(info_filepath, "w", encoding="utf-8") as jsonconfig:
     #        json.dump(model.config, jsonconfig)
 
-    for k, v in data.items():
-        print(k, len(v))
-
-    print("Saving COCO in ", OUTPUT_DIR)
-    with open(os.path.join(OUTPUT_DIR, "coco_annotations.json"), "w", encoding="utf-8") as jsonfile:
-        json.dump(coco, jsonfile)
+    if create_coco_anns:
+        print("Saving COCO in ", OUTPUT_DIR)
+        with open(os.path.join(OUTPUT_DIR, "coco_annotations.json"), "w", encoding="utf-8") as jsonfile:
+            json.dump(coco, jsonfile)
 
     df = pandas.DataFrame().from_dict(data)
     df.to_csv(os.path.join(OUTPUT_DIR, "annotations.csv"), na_rep="nan", header=True)
 
-    # return COCO and data dict
-    return coco, data
+    return data
 
 
 def single_image_prediction(
@@ -377,11 +424,11 @@ def single_image_prediction(
     device="cuda:0",
 ):
     nx, ny = input_image.shape[:2]  # Note: image can be padded or cropped
-    input_image = torch.from_numpy(input_image.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).float()
-    input_image = input_image.to(device)
+    input_tensor = torch.from_numpy(input_image.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).float()
+    input_tensor = input_tensor.to(device)
 
     results = model(
-        input_image,
+        input_tensor,
         training=False,
         cls_threshold=thresholds[0],
         nms_threshold=thresholds[2],  # iou threshold or cls threshold in MatrixNMX
@@ -405,17 +452,31 @@ def single_image_prediction(
     mask_stride = nx // labeled_image.shape[0]
     # Resize to input size (not fullsize because it's too big!) and delete padding
     resized_labeled_image = sk.transform.resize(labeled_image, (nx, ny), order=0)
-    region_properties = regionprops(resized_labeled_image, extra_properties=(max_inscribed_radius_func,))
 
-    final_labels = np.array([prop["label"] for prop in region_properties]) - 1
-    # some slices may be empty -> all pixel values are < seg_threshold
+    final_labels = np.unique(resized_labeled_image)[1:]
+    final_indexes = final_labels - 1
+    # final_labels may be non consecutive or some slices may be empty -> all pixel values are < seg_threshold
     if final_labels.size != torch.numel(pred_cls_ids):
-        pred_scores = pred_scores[final_labels]
-        pred_cls_ids = pred_cls_ids[final_labels]
-        pred_masses = pred_masses[final_labels]
+        pred_scores = pred_scores[final_indexes]
+        pred_cls_ids = pred_cls_ids[final_indexes]
+        pred_masses = pred_masses[final_indexes]
+    if np.max(final_indexes) > torch.numel(pred_cls_ids):
+        resized_labeled_image, final_labels, (pred_scores, pred_cls_ids, pred_masses) = relabel_and_filter(
+            torch.from_numpy(resized_labeled_image),
+            torch.from_numpy(final_labels),
+            pred_scores,
+            pred_cls_ids,
+            pred_masses,
+        )
+        resized_labeled_image = resized_labeled_image.numpy()
+        final_labels = final_labels.numpy()
 
     if torch.numel(pred_scores) <= 0:  # No detection !
         return None, None, None, None, None, None
+
+    region_properties = regionprops(
+        resized_labeled_image, extra_properties=(max_inscribed_radius_func, min_feret_diameter_func)
+    )
 
     return (
         region_properties,
@@ -442,8 +503,9 @@ def stream_predict(
     bgcolor=BGCOLOR,
     minarea=MINAREA,
     subdirs=True,
-    save_imgs=True,
+    save_imgs="class",
     device="cuda:0",
+    **kwargs,
 ):
     """
     Performs streaming prediction on a directory of images using a segmentation/detection model,
@@ -476,7 +538,8 @@ def stream_predict(
             - area: List of object areas.
             - mass: List of predicted masses.
             - axis_major_length, axis_minor_length: Major/minor axis lengths.
-            - feret_diameter_max: Maximum Feret diameter.
+            - max_feret_diameter: Maximum Feret diameter.
+            - min feret diameter
             - max_inscribed_radius: Maximum inscribed radius.
 
     Side Effects:
@@ -531,7 +594,8 @@ def stream_predict(
         "mass": [],
         "axis_major_length": [],
         "axis_minor_length": [],
-        "feret_diameter_max": [],
+        "max_feret_diameter": [],
+        "min_feret_diameter": [],
         "max_inscribed_radius": [],
     }
 
@@ -549,7 +613,7 @@ def stream_predict(
         impath = img_dict[imgname]
         PILimg = Image.open(impath)
 
-        image = np.array(PILimg) / 255.0
+        image = np.array(PILimg).astype(np.float32) / 255.0
         ini_nx, ini_ny = image.shape[0:2]
 
         print(
@@ -601,20 +665,37 @@ def stream_predict(
         if counter == 0:
             # on extrait toutes les boites sauf celle touchant le bas de l'image (x=nx-padx1)
             middle_indexes = np.where(pred_boxes[:, 2] < nx - deltaL)
+            bottom_indexes = np.where(pred_boxes[:, 2] >= nx - deltaL)
+            up_indexes = [np.array([])]
+
         elif counter == len(img_dict) - 1:
             # On extrait toutes les boites sauf celles touchant le haut (x=0+padx0)
-            middle_indexes = np.where(pred_boxes[:, 0] > deltaL)
+            if prev_bottom_boxes.size > 0:
+                middle_indexes = np.where(pred_boxes[:, 0] > deltaL)
+                up_indexes = np.where(pred_boxes[:, 0] <= deltaL)
+            else:
+                middle_indexes = np.arange(labels.size)
+                up_indexes = [np.array([])]
+            # dernière image donc pas besoin d'indexer les objets touchants le bas
+            bottom_indexes = [np.array([])]
+
         else:
             # On extrait toutes les boites sauf celles touchant le haut(x=0) ET le bas (x=nx)
-            middle_indexes = np.where((pred_boxes[:, 2] < nx - deltaL) & (pred_boxes[:, 0] > deltaL))
+            if prev_bottom_boxes.size > 0:
+                middle_indexes = np.where((pred_boxes[:, 2] < nx - deltaL) & (pred_boxes[:, 0] > deltaL))
+                bottom_indexes = np.where(pred_boxes[:, 2] >= nx - deltaL)
+                up_indexes = np.where(pred_boxes[:, 0] <= deltaL)
+            # si pas d'objets détectés en bas de l'image précédante, il n'y a pas besoin de créer une nouvelle image pour le raccord
+            else:
+                middle_indexes = np.where(pred_boxes[:, 2] < nx - deltaL)
+                bottom_indexes = np.where(pred_boxes[:, 2] >= nx - deltaL)
+                up_indexes = [np.array([])]
 
         middle_labels = []
         if middle_indexes[0].size > 0:
             middle_labels = labels[middle_indexes]
 
         # le "haut de l'image" correspond à nx=0, le bas à nx-1
-        up_indexes = np.where(pred_boxes[:, 0] <= deltaL)
-        bottom_indexes = np.where(pred_boxes[:, 2] >= nx - deltaL)
 
         print(
             f"...OK. Found {torch.numel(pred_scores)} instances. ",
@@ -640,22 +721,21 @@ def stream_predict(
             # Saving properties of objects not touching the edges
             area = [prop["area"] * inv_ratio**2 for prop in region_properties if prop["label"] in middle_labels]
             axis_major_length = [
-                int(np.around(prop["axis_major_length"] * inv_ratio))
-                for prop in region_properties
-                if prop["label"] in middle_labels
+                prop["axis_major_length"] * inv_ratio for prop in region_properties if prop["label"] in middle_labels
             ]
             axis_minor_length = [
-                int(np.around(prop["axis_minor_length"] * inv_ratio))
-                for prop in region_properties
-                if prop["label"] in middle_labels
+                prop["axis_minor_length"] * inv_ratio for prop in region_properties if prop["label"] in middle_labels
             ]
-            feret_diameter_max = [
-                int(np.around(prop["feret_diameter_max"] * inv_ratio))
+            max_feret_diameter = [
+                prop["feret_diameter_max"] * inv_ratio for prop in region_properties if prop["label"] in middle_labels
+            ]
+            min_feret_diameter = [
+                prop["min_feret_diameter_func"] * inv_ratio
                 for prop in region_properties
                 if prop["label"] in middle_labels
             ]
             max_inscribed_radius = [
-                int(np.around(prop["max_inscribed_radius_func"] * inv_ratio))
+                prop["max_inscribed_radius_func"] * inv_ratio
                 for prop in region_properties
                 if prop["label"] in middle_labels
             ]
@@ -665,30 +745,52 @@ def stream_predict(
             masses = pred_masses[middle_indexes] / scaling
             classes = pred_cls_ids[middle_indexes].tolist()
 
+            resized_bboxes = np.around(middle_pred_boxes * inv_ratio).astype(int)
+
             data["baseimg"].extend([imgname] * len(middle_labels))
             data["label"].extend(middle_labels)
             data["res"].extend([resolution] * len(middle_labels))
-            data["x0"].extend(middle_pred_boxes[:, 0].tolist())
-            data["x1"].extend(middle_pred_boxes[:, 2].tolist())
-            data["y0"].extend(middle_pred_boxes[:, 1].tolist())
-            data["y1"].extend(middle_pred_boxes[:, 3].tolist())
+            data["x0"].extend(resized_bboxes[:, 0].tolist())
+            data["x1"].extend(resized_bboxes[:, 2].tolist())
+            data["y0"].extend(resized_bboxes[:, 1].tolist())
+            data["y1"].extend(resized_bboxes[:, 3].tolist())
             data["area"].extend(area)
             data["mass"].extend(masses.tolist())
             if idx_to_cls is not None:
-                classes = [idx_to_cls[x] for x in classes]
+                classes = [idx_to_cls.get(x, "UNKNOWN") for x in classes]
             data["class"].extend(classes)
             data["axis_major_length"].extend(axis_major_length)
             data["axis_minor_length"].extend(axis_minor_length)
-            data["feret_diameter_max"].extend(feret_diameter_max)
+            data["max_feret_diameter"].extend(max_feret_diameter)
+            data["min_feret_diameter"].extend(min_feret_diameter)
             data["max_inscribed_radius"].extend(max_inscribed_radius)
 
-            if save_imgs:
+            if save_imgs == "instance":
                 # save image and labels without objects touching the edges. No unpadding or upscaling to simplify.
                 vizuname = "VIZU-{}.jpg".format(os.path.splitext(imgname)[0])
                 bd = sk.segmentation.find_boundaries(middle_masks, connectivity=2, mode="inner", background=0)
                 vizu = label2rgb(middle_masks, resized_image, alpha=0.25, bg_label=0, colors=_COLORS, saturation=0.5)
                 vizu = np.where(bd[..., np.newaxis], (0, 0, 0), vizu)
                 vizu = np.around(255 * vizu).astype(np.uint8)
+                Image.fromarray(vizu).save(os.path.join(VIZU_DIR, vizuname))
+
+            elif save_imgs == "class":
+                if idx_to_cls is not None:
+                    classes = [idx_to_cls.get(x, "UNKNOWN") for x in pred_cls_ids.tolist()]
+                vizu = draw_instances(
+                    resized_image,
+                    middle_masks,
+                    cls_ids=classes,
+                    bboxes=middle_pred_boxes,
+                    draw_boundaries=True,
+                    showtext=True,
+                    drawrect=True,
+                    mode="class",
+                    alpha=0.3,
+                    boundary_mode=kwargs.get("boundary_mode", "inner"),
+                    fontscale=kwargs.get("fontscale", 2),
+                )
+                vizuname = "VIZU-{}.jpg".format(os.path.splitext(imgname)[0])
                 Image.fromarray(vizu).save(os.path.join(VIZU_DIR, vizuname))
 
         else:
@@ -780,7 +882,8 @@ def stream_predict(
                 area = np.array([prop["area"] for prop in o_region_properties])
                 axis_major_length = np.array([prop["axis_major_length"] for prop in o_region_properties])
                 axis_minor_length = np.array([prop["axis_minor_length"] for prop in o_region_properties])
-                feret_diameter_max = np.array([prop["feret_diameter_max"] for prop in o_region_properties])
+                max_feret_diameter = np.array([prop["feret_diameter_max"] for prop in o_region_properties])
+                min_feret_diameter = np.array([prop["min_feret_diameter_func"] for prop in o_region_properties])
                 max_inscribed_radius = np.array([prop["max_inscribed_radius_func"] for prop in o_region_properties])
 
                 res_ratio = (nx // mask_stride) / fullsize_nx
@@ -798,11 +901,12 @@ def stream_predict(
                 data["area"].extend(area.tolist())
                 data["mass"].extend(masses.tolist())
                 if idx_to_cls is not None:
-                    classes = [idx_to_cls[x] for x in classes]
+                    classes = [idx_to_cls.get(x, "UNKNOWN") for x in classes]
                 data["class"].extend(classes)
                 data["axis_major_length"].extend(axis_major_length.tolist())
                 data["axis_minor_length"].extend(axis_minor_length.tolist())
-                data["feret_diameter_max"].extend(feret_diameter_max.tolist())
+                data["max_feret_diameter"].extend(max_feret_diameter.tolist())
+                data["min_feret_diameter"].extend(min_feret_diameter.tolist())
                 data["max_inscribed_radius"].extend(max_inscribed_radius.tolist())
 
                 if save_imgs:
@@ -821,6 +925,21 @@ def stream_predict(
                     vizu = np.where(bd[..., np.newaxis], (0, 0, 0), vizu)
                     vizu = np.around(255 * vizu).astype(np.uint8)
                     Image.fromarray(vizu).save(os.path.join(VIZU_DIR, vizuname))
+
+                elif save_imgs == "class":
+                    vizu = draw_instances(
+                        overlap_image,
+                        o_resized_labeled_image,
+                        classes,
+                        bboxes=o_pred_boxes,
+                        draw_boundaries=True,
+                        showtext=True,
+                        drawrect=True,
+                        mode="class",
+                        alpha=0.3,
+                        boundary_mode=kwargs.get("boundary_mode", "inner"),
+                        fontscale=kwargs.get("fontscale", 2),
+                    )
 
         # paramètres utilisés dans l'itération suivante
         # bottom_labels = labels[bottom_indexes]
@@ -845,3 +964,21 @@ def stream_predict(
 def max_inscribed_radius_func(mask):
 
     return distance_transform_edt(np.pad(mask, 1)).max()
+
+
+def min_feret_diameter_func(mask):
+    """
+    Calcule la boîte englobante orientée (Rotated Bounding Box)
+    en utilisant les coordonnées des pixels de la région.
+
+    Return width of the rotated box
+    """
+    # props.coords contient les coordonnées (ligne, colonne) des pixels
+    # On doit les inverser en (colonne, ligne) pour OpenCV (x, y)
+    # coords_xy = np.fliplr(mask.coords)
+    contours, n = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contour = max(contours, key=cv2.contourArea)
+    # minAreaRect nécessite un numpy.array de points
+    W = min(cv2.minAreaRect(contour)[1])
+
+    return W

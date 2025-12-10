@@ -126,56 +126,71 @@ def compute_image_loss(
 
             if compute_cls_loss and mask_quality_weighting:
 
-                cls_loss = focal_loss(cls_pred, cls_targets, label_smoothing=label_smoothing, reduction="none").view(
-                    cls_pred.shape
-                ) + cls_loss * (mask_quality**beta).unsqueeze(-1)
+                cls_loss = focal_loss_label_smoothing(
+                    cls_pred, cls_targets, label_smoothing=label_smoothing, reduction="none"
+                ).view(cls_pred.shape) + cls_loss * (mask_quality**beta).unsqueeze(-1)
                 cls_loss = cls_loss.sum()
-                compute_cls_loss = False  # already computed here
+                compute_cls_loss = False
 
     if compute_cls_loss:
-        cls_loss = focal_loss(cls_pred, cls_targets, label_smoothing=label_smoothing)
+        cls_loss = focal_loss_label_smoothing(cls_pred, cls_targets, label_smoothing=label_smoothing)
 
     return cls_loss * weights[0], seg_loss * weights[1], density_loss * weights[2]
 
 
-def focal_loss_with_logits(logits, targets, alpha=0.25, gamma=2.0, reduction="mean"):
+def focal_loss_label_smoothing(pred, gt, alpha=0.25, gamma=2.0, label_smoothing: float = 0.0, reduction="sum"):
+    """Focal loss variant that applies label smoothing only on spatial positions
+    where the last-dimension argmax equals 1.
+
+    - If `gt` is one-hot (last dim > 1), a position is considered positive when
+      `gt.argmax(dim=-1) == 1`. Label smoothing is applied only
+      on those positions; other positions remain unchanged (0).
+    - If `gt` is binary (no channel dim), smoothing is applied on entries equal to 1.
+
+    The weighting and normalization use the count of positive positions (anchor_obj_count).
     """
-    Binary Focal Loss using logits (no sigmoid) and log-sigmoid for stability.
+    orig_gt = gt.clone()
 
-    Args:
-        logits (Tensor): raw model outputs (before sigmoid), shape (N,) or (N, 1)
-        targets (Tensor): binary labels (0 or 1), same shape as logits
-        alpha (float): weighting factor for the class 1
-        gamma (float): focusing parameter
-        reduction (str): 'none', 'mean' or 'sum'
+    is_one_hot = orig_gt.dim() > 1 and orig_gt.shape[-1] > 1
 
-    Returns:
-        Tensor: focal loss value
-    """
-    targets = targets.reshape(1, -1).type_as(logits)
-    logits = logits.reshape(1, -1)
+    # Determine positive positions (argmax == 1)
+    if is_one_hot:
+        pos_positions = orig_gt.argmax(dim=-1) == 1
+        anchor_obj_count = pos_positions.sum().float()
+        n_class = orig_gt.shape[-1]
+    else:
+        pos_positions = orig_gt == 1
+        anchor_obj_count = pos_positions.sum().float()
+        n_class = 1
 
-    # log(p) and log(1-p) in a numerically stable way
-    logp_pos = F.logsigmoid(logits)  # log(sigmoid(x)) = log(p)
-    logp_neg = F.logsigmoid(-logits)  # log(sigmoid(-x)) = log(1 - p)
+    # Build smoothed gt: only apply smoothing on the selected positions
+    if label_smoothing and label_smoothing > 0.0:
+        if is_one_hot:
+            smooth = torch.where(orig_gt == 1, 1.0 - label_smoothing, label_smoothing / (n_class - 1))
+            gt = orig_gt.float()
+            mask_expand = pos_positions.unsqueeze(-1).expand_as(orig_gt)
+            gt = torch.where(mask_expand, smooth, gt)
+        else:
+            gt = torch.where(orig_gt == 1, 1.0 - label_smoothing, label_smoothing)
+    else:
+        gt = orig_gt.float()
 
-    # p_t is sigmoid(x) if y == 1 else 1 - sigmoid(x)
-    p_t = torch.exp(logp_pos) * targets + torch.exp(logp_neg) * (1 - targets)
+    # Flatten inputs for BCE and weighting
+    pred = pred.reshape(1, -1)
+    gt = gt.reshape(1, -1)
+    pos_mask = None
+    if is_one_hot:
+        pos_mask = pos_positions.reshape(1, -1)
+    else:
+        pos_mask = (orig_gt == 1).reshape(1, -1)
 
-    # alpha_t is alpha if y == 1 else (1 - alpha)
-    alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+    alpha_factor = torch.ones_like(gt) * alpha
+    alpha_factor = torch.where(pos_mask, alpha_factor, 1 - alpha_factor)
+    focal_weight = torch.where(pos_mask, 1 - pred, pred)
+    focal_weight = alpha_factor * (focal_weight**gamma) / (anchor_obj_count + 1)
+    focal_weight = focal_weight.float().detach()
 
-    # focal loss: -alpha_t * (1 - p_t)^gamma * log(p_t)
-    focal_term = (1 - p_t) ** gamma
-    logp_t = logp_pos * targets + logp_neg * (1 - targets)
-
-    loss = -alpha_t * focal_term * logp_t
-
-    if reduction == "mean":
-        return loss.mean()
-    elif reduction == "sum":
-        return loss.sum()
-    return loss
+    return F.binary_cross_entropy(pred, gt.float(), reduction=reduction, weight=focal_weight)
 
 
 def focal_loss(pred, gt, alpha=0.25, gamma=2.0, label_smoothing: float = 0.0, reduction="sum"):
@@ -194,7 +209,7 @@ def focal_loss(pred, gt, alpha=0.25, gamma=2.0, label_smoothing: float = 0.0, re
 
 def dice_loss_with_logits(logits, targets, eps=1e-6, label_smoothing=0.0, reduction="mean"):
     """
-    Binary Dice Loss calcul partir de logits en utilisant logsigmoid pour �viter la saturation.
+    Binary Dice Loss calcul partir de logits en utilisant logsigmoid
 
     Args:
         logits (Tensor): pr�dictions non activ�es, shape (N, *) ou (N, 1, H, W)

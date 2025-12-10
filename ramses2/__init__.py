@@ -4,3 +4,4 @@ from .utils import *
 from .model import *
 from .core import *
 from .inference import *
+from .GUI import *

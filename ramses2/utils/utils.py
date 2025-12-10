@@ -425,7 +425,8 @@ def crop_to_aspect_ratio(target_shape, image):
 
 
 def pad_to_aspect_ratio(target_shape, image):
-    """Pad an image so that its aspect ratio is the same as target_shape"""
+    """Pad an image so that its aspect ratio is the same as target_shape
+    It DOES NOT resize the image to target_shape!"""
 
     target_ratio = target_shape[0] / target_shape[1]
 

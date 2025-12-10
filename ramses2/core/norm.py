@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 
 class LayerNorm2d(nn.LayerNorm):
-    # Normalize each channel separately (normalized_shape MUST be defined when intanciating the Layer)
+    # normalized_shape MUST be defined when intanciating the Layer
     def forward(self, input: Tensor) -> Tensor:
         input = input.permute(0, 2, 3, 1)
         input = F.layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)
@@ -15,7 +15,7 @@ class LayerNorm2d(nn.LayerNorm):
 
 
 class RMSNorm2d(nn.RMSNorm):
-    # Normalize each channel separately (normalized_shape MUST be defined when intanciating the Layer)
+    # normalized_shape MUST be defined when intanciating the Layer
     def forward(self, x: Tensor) -> Tensor:
         x = x.permute(0, 2, 3, 1)
         x = F.rms_norm(x, self.normalized_shape, self.weight, self.eps)

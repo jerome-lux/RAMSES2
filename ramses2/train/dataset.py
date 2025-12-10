@@ -627,7 +627,7 @@ class DatasetManager:
                 continue
 
             # Check if a bbox fall into the cropped zone. If this is the case, the image is dismissed
-            im = Image.open(imgname[0])  # Just need dimensions here -should add them in metadata.json !
+            im = Image.open(imgname[0])  # Just need dimensions
             ny = im.width
             nx = im.height
             im.close()
