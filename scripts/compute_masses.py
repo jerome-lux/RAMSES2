@@ -12,7 +12,7 @@ VALID_IMAGE_FORMATS = [".jpg", ".png", ".tif", ".bmp"]
 parser = argparse.ArgumentParser(
     description=(
         "Compute mass of individual aggregates using metadata.json and update annotations.csv"
-        "See https://doi.org/10.1016/j.autcon.2020.103204"
+        "See https://doi.org/10.1016/j.compind.2023.103889 and https://doi.org/10.1016/j.autcon.2020.103204"
     ),
     fromfile_prefix_chars="@",
 )
