@@ -4,12 +4,13 @@ RAMSES is a neural network model for instance segmentation and mass estimation o
 
 It is based on the SOLOv2 instance segmentation model (Segmenting Objects by LOcations — https://arxiv.org/pdf/2003.10152.pdf).
 
-<div style="text-align: center;">
-    <img src="./images/model.jpg" alt="RAMSES architecture" width="75%">
-</div>
+<figure markdown>
+    <img src="./images/model.jpg" alt="RAMSES architecture" width="75%" style="text-align:center">
+</figure>
 
-<img src="./images/SEG_P20220504_00119.png" alt="example segmentation 1" width="49%">
-<img src="./images/SEG_P20240507_00019.png" alt="example segmentation 2" width="49%">
+
+<img src="./images/SEG_P20220504_00119.png" alt="example segmentation 1" width="45%">
+<img src="./images/SEG_P20240507_00019.png" alt="example segmentation 2" width="45%">
 
 ## Recycled Aggregates Dataset
 
@@ -51,6 +52,8 @@ with open(Path("../checkpoints/2048x3072/config.json"), 'r') as jsonfile:
     params = json.load(jsonfile)
 config = ramses2.Config(**params)
 model = ramses2.RAMSESModel(config)
+state_dict = torch.load(Path("../checkpoints/2048x3072/best-val-loss.pt"))
+model.load_state_dict(state_dict, strict=False)
 ```
 
 ### Inference
