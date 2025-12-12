@@ -9,12 +9,11 @@ It is based on the SOLOv2 instance segmentation model (Segmenting Objects by LOc
 </figure>
 
 
-<img src="./images/SEG_P20220504_00119.png" alt="example segmentation 1" width="45%">
-<img src="./images/SEG_P20240507_00019.png" alt="example segmentation 2" width="45%">
+<img src="./images/SEG_P20220504_00119.png" alt="example segmentation 1" width="45%"> <img src="./images/SEG_P20240507_00019.png" alt="example segmentation 2" width="45%">
 
 ## Recycled Aggregates Dataset
 
-The link to the Recycled Aggregate Database will be available soon.  
+The Recycled Aggregate Database is available here: https://doi.org/10.57745/KC4EA2.  
 It contains **90,000 instances** of labeled aggregates, as well as corresponding mass data.
 
 It features 18 classes of recycled aggregates:
@@ -29,8 +28,8 @@ It features 18 classes of recycled aggregates:
 | Rcu01    | 547       | Lime mortar |
 | Rg       | 145       | Glass       |
 | Ru01     | 14,245    | White stones such as limestone |
-| Ru02     | 10,614    | Grey stones such as basalt and similar grainy stones |
-| Ru04     | 5,683     | Siliceous and rather angular stones |
+| Ru02     | 10,614    | Grey stones such as basalt and grainy stones |
+| Ru04     | 5,683     | Siliceous and angular stones |
 | Ru05     | 5,993     | Rounded alluvial stones |
 | Ru06     | 2,891     | Slate       |
 | X01      | 1,797     | Wood        |
