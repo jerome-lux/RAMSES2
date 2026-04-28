@@ -72,6 +72,7 @@ class RAMSESModel(nn.Module):
         self.backbone = config.backbone
         self.activation = getattr(nn, config.activation)
         self.normalization = partial(get_class(config.normalization), **self.config.normalization_kw)
+        self.use_geom = self.config.use_geom
 
         if config.backbone_params.get("activation", None) is not None:
             config.backbone_params.update({"activation": getattr(nn, config.backbone_params["activation"])})
@@ -106,6 +107,7 @@ class RAMSESModel(nn.Module):
             head_layers=config.head_layers,
             conv_filters=config.head_filters,
             kernel_filters=config.mask_output_filters * config.kernel_size**2,
+            cls_factor_layers=config.cls_factor_layers,
             activation=self.activation,
             normalization=self.normalization,
         )
@@ -179,7 +181,7 @@ class RAMSESModel(nn.Module):
         )  # mask output, geom features
 
         if training:
-            # return the raw preduictions for training
+            # return the raw predictions for training
             return flat_pred_cls, flat_cls_factor, flat_pred_kernel, seg_preds, geom_features
         else:
             # compute the final instance masks, class scores, class labels and normalized mass
@@ -200,6 +202,7 @@ class RAMSESModel(nn.Module):
                 scale_by_mask_confidence=scale_by_mask_scores,
                 use_binary_masks=self.config.use_binary_masks,
                 nms_mode=nms_mode,
+                use_geom=self.use_geom
             )
 
             # return a list of dict (one for each image in the batch)
@@ -799,6 +802,7 @@ def compute_masks(
     scale_by_mask_confidence=True,
     use_binary_masks=False,
     nms_mode="greedy",
+    use_geom=True
 ):
     """
     Compute instance masks, scores, class labels, and densities for each image in a batch using PyTorch tensors.
@@ -944,14 +948,26 @@ def compute_masks(
         geom = geom_feats[b]  # [1, H, W]
 
         if seg_preds.shape[0] > 0:
-            if use_binary_masks:
-                binary_masks = (seg_preds >= mask_threshold).float()
-                masses = (binary_masks * geom).view(seg_preds.size(0), -1).sum(dim=1)
+            if not use_geom:  # For ablation study, using only the class factor multiplied by the mask area
+                geometric_factor = (seg_preds >= mask_threshold).float().view(seg_preds.size(0), -1).sum(dim=1)
+                masses = cls_factors_pos * geometric_factor
+                # masses = cls_factors_pos
             else:
-                masses = (seg_preds * geom).view(seg_preds.size(0), -1).sum(dim=1)
-            masses = masses * cls_factors_pos
+                if use_binary_masks:
+                    binary_masks = (seg_preds >= mask_threshold).float()
+                    geometric_factor = (binary_masks * geom).view(seg_preds.size(0), -1).sum(dim=1)
+                else:
+                    geometric_factor = (seg_preds * geom).view(seg_preds.size(0), -1).sum(dim=1)
+                masses = geometric_factor * cls_factors_pos
         else:
             masses = torch.empty((0,), device=device)
-        results.append({"masks": seg_preds, "scores": scores, "cls_labels": cls_labels_pos, "masses": masses})
+            geometric_factor = torch.empty((0,), device=device)
+            cls_factors_pos = torch.empty((0,), device=device)
+        results.append({"masks": seg_preds,
+                        "scores": scores,
+                        "cls_labels": cls_labels_pos,
+                        "masses": masses,
+                        "geom_factors": geometric_factor,
+                        "class_factors": cls_factors_pos})
 
     return results

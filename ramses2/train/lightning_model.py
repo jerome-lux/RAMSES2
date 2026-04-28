@@ -21,6 +21,7 @@ class TrainConfig:
         self.cls_threshold = 0.5
         self.max_pos = 768
         self.mask_quality_weighting = True
+        self.use_geom=True
 
         # Update defaults parameters with kwargs
         for k, v in kwargs.items():
@@ -118,6 +119,7 @@ class RAMSESLightning(pl.LightningModule):
         self.label_smoothing = train_config.label_smoothing
         self.cls_threshold = train_config.cls_threshold
         self.mask_quality_weighting = train_config.mask_quality_weighting
+        self.use_geom = train_config.use_geom
 
     def forward(self, x, training=True):
         return self.model(x, training=training)
@@ -129,7 +131,6 @@ class RAMSESLightning(pl.LightningModule):
         labels = batch["label"]
         category_id = batch["category_id"]
         mass = batch["mass"]
-        # print(batch["filename"])
         # Forward pass
         flat_pred_cls, flat_cls_factor, flat_pred_kernel, seg_preds, geom_features = self.model(images, training=True)
         flat_pred_cls = flat_pred_cls.permute(0, 2, 1)  # [B, ncls, nloc] -> [B, nloc, ncls]
@@ -156,6 +157,8 @@ class RAMSESLightning(pl.LightningModule):
             )
             # one hot encoding. Delete the bg slice
             class_targets = F.one_hot(class_targets.long(), self.ncls + 1)[..., 1:]
+            # print(batch["filename"][i])
+            # print(flat_pred_cls[i].shape)
             # Flattening
             # class_targets = class_targets.view(-1, self.ncls)
             # label_targets = label_targets.view(-1)
@@ -181,7 +184,7 @@ class RAMSESLightning(pl.LightningModule):
                 seg_loss_func=self.seg_loss,
                 max_pos=self.max_pos,
                 label_smoothing=self.label_smoothing,
-                mask_quality_weighting=self.mask_quality_weighting,
+                use_geom=self.use_geom
             )
             total_cls_loss += cls_loss
             total_seg_loss += seg_loss
@@ -309,7 +312,7 @@ class RAMSESLightning(pl.LightningModule):
                 seg_loss_func=self.seg_loss,
                 max_pos=self.max_pos,
                 label_smoothing=self.label_smoothing,
-                mask_quality_weighting=self.mask_quality_weighting,
+                use_geom=self.use_geom
             )
             total_cls_loss += cls_loss
             total_seg_loss += seg_loss

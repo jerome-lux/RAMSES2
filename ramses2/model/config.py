@@ -114,6 +114,7 @@ class Config:
         self.head_filters = 256
         self.kernel_size = 1
         self.grid_sizes = [64, 36, 24, 16, 12]
+        self.cls_factor_layers = 2
 
         # SOLO MASK head
         self.point_nms = False
@@ -139,6 +140,7 @@ class Config:
         # tagets allocation
         self.scale_ranges = [[1, 96], [48, 192], [96, 384], [192, 768], [384, 2048]]  # if P2 level is stride 4
         self.offset_factor = 0.25
+        self.use_geom=True
 
         # Update defaults parameters with kwargs
         for k, v in kwargs.items():
