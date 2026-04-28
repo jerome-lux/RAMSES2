@@ -456,21 +456,38 @@ def plot_instances(
         bd = np.ma.masked_equal(bd, 0)
 
     ax.imshow(image)  # , extent = (0, image.shape[1], 0, image.shape[0]))
-    masked_mask = np.ma.masked_equal(mask, 0)
 
-    if mode == "instance":
-        cmap = ListedColormap(_COLORS, N=labels.size - 1)
-        ax.imshow(
-            masked_mask, cmap=cmap, interpolation="nearest", alpha=alpha
-        )  # , extent = (0, image.shape[1], 0, image.shape[0]))
-    elif mode == "class":
-        colors = [mpl.colors.to_rgb(_CLASS_COLORS[key]) for key in cls_ids]
-        cmap = ListedColormap(colors, N=labels.size - 1)
+    # Build a color map that maps each present label to a specific color index
+    N = labels.size - 1
+    if N > 0:
+        if mode == "instance":
+            # take the first N colors from the palette
+            colors_for_cmap = _COLORS[:N]
+        else:
+            # For class mode, pick the color corresponding to the class id of each present label
+            # labels[1:] contains the actual label ids present in the mask
+            colors_for_cmap = [mpl.colors.to_rgb(_CLASS_COLORS[cls_ids[label - 1]]) for label in labels[1:]]
+
+        cmap = ListedColormap(colors_for_cmap, N=N)
+
+        # Remap mask labels to consecutive indices (1..N) so that color indexing is deterministic
+        remapped = np.zeros_like(mask, dtype=int)
+        for i, label in enumerate(labels[1:], start=1):
+            remapped[mask == label] = i
+        masked_remapped = np.ma.masked_equal(remapped, 0)
+
+        # Use a BoundaryNorm so each integer maps exactly to one colormap entry
+        boundaries = np.arange(N + 1) + 0.5
+        norm = mpl.colors.BoundaryNorm(boundaries, ncolors=N)
+
+        ax.imshow(masked_remapped, cmap=cmap, interpolation="nearest", alpha=alpha, norm=norm)
+    else:
+        # No instances to draw
+        cmap = ListedColormap([], N=0)
 
     if cls_ids is not None and cls_scores is not None:
         for i, label in enumerate(labels[1:]):
-            # for i, (cls_id, score, label) in enumerate(zip(cls_ids, cls_scores, labels[1:])):
-
+            # current_color corresponds to the i-th entry in cmap.colors (matches remapped index i+1)
             current_color = cmap.colors[i]
 
             # txt_cls = f"{cls_id}:{score:.2f}"
