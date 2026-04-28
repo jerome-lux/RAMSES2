@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 import sys
 
 # TODO: add counting loss ?
@@ -15,7 +16,7 @@ def compute_image_loss(
     compute_density_loss=True,
     label_smoothing=0.1,
     seg_loss_func="dice",
-    mask_quality_weighting=True,
+    use_geom=True,
     beta=2.0,
 ):
     """Compute the loss for one image
@@ -83,9 +84,14 @@ def compute_image_loss(
                 mask_slice = (ohe_masks[..., label_targets[pos_idx[i]] - 1] > 0).float()
                 geom_slice = geom_factor_pred[0]
                 # The predicted mass is the product between the sum of the geom features and the predicted class factor (gt locations)
-                pred_density = torch.sum(mask_slice * geom_slice) * cls_factor_pos[i]
+                if use_geom:
+                    pred_density = torch.sum(mask_slice * geom_slice) * cls_factor_pos[i]
+                else: # Only for ablation study
+                    pred_density = torch.sum(mask_slice) * cls_factor_pos[i]
+                    # pred_density =  cls_factor_pos[i]
                 density_loss = density_loss + MAPEIgnoringNaN(density_targets[pos_idx[i]], pred_density)
             density_loss = density_loss / pos_idx.shape[0]
+
         if compute_seg_loss:
             # Note that we use the kernels predicted at the ground truth positive locations (and not at the positive locations of the cls_pred)
             kernel_pred_pos = kernel_pred[pos_idx]  # -> [npos, k*k*in_ch]
@@ -100,7 +106,7 @@ def compute_image_loss(
             # reg_loss = torch.mean(seg_preds_logits.abs())
             # TODO: dynamically set new gt locations using best (dice) top-k masks?
             seg_preds = torch.sigmoid(seg_preds_logits)
-            mask_quality = torch.zeros([nloc], device=cls_targets.device)
+            # mask_quality = torch.zeros([nloc], device=cls_targets.device)
             for i in range(pos_idx.shape[0]):
                 # if label_targets[pos_idx[i]] > ohe_masks.shape[-1]:
                 #     print(label_targets, ohe_masks.shape, pos_idx[i])
@@ -108,32 +114,37 @@ def compute_image_loss(
                 target_mask = ohe_masks[..., label_targets[pos_idx[i]] - 1]  # (H, W)
 
                 if seg_loss_func == "dice":
-                    mask_loss = dice_loss(seg_preds[i, ...], target_mask, label_smoothing=label_smoothing)
+                    mask_loss = dice_loss(seg_preds[i, ...], target_mask)
                 elif seg_loss_func == "focal":
-                    mask_loss = focal_loss(seg_preds[i, ...], target_mask, label_smoothing=label_smoothing)
+                    mask_loss = focal_loss(seg_preds[i, ...], target_mask)
                 elif seg_loss_func == "both":
                     mask_loss = 0.5 * focal_loss(
-                        seg_preds[i, ...], target_mask, label_smoothing=label_smoothing
-                    ) + 0.5 * dice_loss(seg_preds[i, ...], target_mask, label_smoothing=label_smoothing)
+                        seg_preds[i, ...], target_mask
+                    ) + 0.5 * dice_loss(seg_preds[i, ...], target_mask)
                 else:
                     print(f"Unknown seg_loss_func: {seg_loss_func}", file=sys.stderr)
                     sys.exit(1)
                 seg_loss = seg_loss + mask_loss
-                if mask_quality_weighting:
-                    mask_quality[pos_idx[i]] = 1.0 - mask_loss.detach()
+                # if mask_quality_weighting:
+                #     mask_quality[pos_idx[i]] = 1.0 - mask_loss.detach()
 
             seg_loss = seg_loss / pos_idx.shape[0]
 
-            if compute_cls_loss and mask_quality_weighting:
+            # if compute_cls_loss and mask_quality_weighting:
 
-                cls_loss = focal_loss_label_smoothing(
-                    cls_pred, cls_targets, label_smoothing=label_smoothing, reduction="none"
-                ).view(cls_pred.shape) + cls_loss * (mask_quality**beta).unsqueeze(-1)
-                cls_loss = cls_loss.sum()
-                compute_cls_loss = False
+            #     cls_loss = focal_loss_label_smoothing(
+            #         cls_pred, cls_targets, label_smoothing=label_smoothing, reduction="none"
+            #     ).view(cls_pred.shape)
+            #     cls_loss = cls_loss * (1 + (mask_quality**beta).unsqueeze(-1))
+            #     cls_loss = cls_loss.sum()
+            #     compute_cls_loss = False
 
     if compute_cls_loss:
-        cls_loss = focal_loss_label_smoothing(cls_pred, cls_targets, label_smoothing=label_smoothing)
+
+        if label_smoothing>0:
+            cls_loss = focal_loss_label_smoothing(cls_pred, cls_targets, label_smoothing=label_smoothing)
+        else:
+            cls_loss = focal_loss(cls_pred, cls_targets)
 
     return cls_loss * weights[0], seg_loss * weights[1], density_loss * weights[2]
 
@@ -150,7 +161,6 @@ def focal_loss_label_smoothing(pred, gt, alpha=0.25, gamma=2.0, label_smoothing:
     The weighting and normalization use the count of positive positions (anchor_obj_count).
     """
     orig_gt = gt.clone()
-
     is_one_hot = orig_gt.dim() > 1 and orig_gt.shape[-1] > 1
 
     # Determine positive positions (argmax == 1)
@@ -175,37 +185,92 @@ def focal_loss_label_smoothing(pred, gt, alpha=0.25, gamma=2.0, label_smoothing:
     else:
         gt = orig_gt.float()
 
+    # Clamp predictions to [0, 1] to avoid numerical instability in BCE
+    pred = torch.clamp(pred, min=1e-7, max=1.0 - 1e-7)
+
     # Flatten inputs for BCE and weighting
     pred = pred.reshape(1, -1)
     gt = gt.reshape(1, -1)
-    pos_mask = None
-    if is_one_hot:
-        pos_mask = pos_positions.reshape(1, -1)
-    else:
-        pos_mask = (orig_gt == 1).reshape(1, -1)
 
-    alpha_factor = torch.ones_like(gt) * alpha
-    alpha_factor = torch.where(pos_mask, alpha_factor, 1 - alpha_factor)
-    focal_weight = torch.where(pos_mask, 1 - pred, pred)
+    # If label_smoothing = 0, this is equivalent to (gt >= 1.0)
+    pos_mask = (gt >= (1.0 - label_smoothing))
+
+    # Apply alpha to positives, (1-alpha) to negatives
+    alpha_tensor = torch.tensor(alpha, device=gt.device)
+    alpha_factor = torch.where(pos_mask, alpha_tensor, 1.0 - alpha_tensor)
+
+    # Calculate focal weight
+    focal_weight = torch.where(pos_mask, 1.0 - pred, pred)
     focal_weight = alpha_factor * (focal_weight**gamma) / (anchor_obj_count + 1)
-    focal_weight = focal_weight.float().detach()
+    focal_weight = focal_weight.detach()
 
     return F.binary_cross_entropy(pred, gt.float(), reduction=reduction, weight=focal_weight)
 
 
-def focal_loss(pred, gt, alpha=0.25, gamma=2.0, label_smoothing: float = 0.0, reduction="sum"):
+def focal_loss(pred, gt, alpha=0.25, gamma=2.0, reduction="sum"):
 
     pred = pred.reshape(1, -1)
     gt = gt.reshape(1, -1)
+    # Clamp to [0, 1] to avoid numerical instability in BCE
+    pred = torch.clamp(pred, min=1e-7, max=1.0 - 1e-7)
+
+    if not torch.isfinite(pred).all():
+        print("Error NaN")
     anchor_obj_count = (gt != 0).sum().float()
     alpha_factor = torch.ones_like(gt) * alpha
     alpha_factor = torch.where(gt == 1, alpha_factor, 1 - alpha_factor)
     focal_weight = torch.where(gt == 1, 1 - pred, pred)
     focal_weight = alpha_factor * focal_weight**gamma / (anchor_obj_count + 1)
     focal_weight = focal_weight.float().detach()
+    gt = torch.clamp(gt.float(), min=1e-7, max=1-1e-7)
     bce = F.binary_cross_entropy(pred, gt.float(), reduction=reduction, weight=focal_weight)
     return bce
 
+
+class FocalLossMulti(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        """
+        Focal Loss for one-hot encoded targets.
+        Args:
+            alpha (torch.Tensor): Weight per class [ncls].
+            gamma (float): Focusing parameter.
+            reduction (str): 'mean', 'sum', or 'none'.
+        """
+        super(FocalLossMulti, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        # inputs: [N, ncls] (logits), targets: [N, ncls] (one-hot)
+
+        # 1. Compute softmax probabilities
+        p = torch.softmax(inputs, dim=-1)
+
+        # 2. Log-probabilities for the cross-entropy part
+        log_p = F.log_softmax(inputs, dim=-1)
+
+        # 3. Calculate Focal Term: (1 - p_target)^gamma
+        # We extract the probability of the 'true' class using the mask
+        pt = (p * targets).sum(dim=1)
+        log_pt = (log_p * targets).sum(dim=1)
+
+        focal_term = (1 - pt) ** self.gamma
+
+        # 4. Combine into loss
+        loss = -focal_term * log_pt
+
+        # 5. Apply Alpha weights if provided
+        if self.alpha is not None:
+            # Broadcast alpha to match targets shape or apply per-sample
+            at = (self.alpha.to(inputs.device) * targets).sum(dim=1)
+            loss = at * loss
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        return loss
 
 def dice_loss_with_logits(logits, targets, eps=1e-6, label_smoothing=0.0, reduction="mean"):
     """
