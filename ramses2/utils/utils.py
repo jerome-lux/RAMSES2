@@ -466,7 +466,7 @@ def pad_to_aspect_ratio(target_shape, image):
     return image, ((px, px + rx), (py), py + ry)
 
 
-def relabel_and_filter(masks: torch.Tensor, original_labels: torch.Tensor, *tensors_to_filter):
+def relabel_and_filter_old(masks: torch.Tensor, original_labels: torch.Tensor, *tensors_to_filter):
     """
     Relabels the labeled mask image with consecutive integers starting from 1,
     and filters associated tensors based on the mapping from original labels.
@@ -530,3 +530,48 @@ def relabel_and_filter(masks: torch.Tensor, original_labels: torch.Tensor, *tens
     filtered_tensors = [t[mapping_indices].to(device) for t in tensors_to_filter]
 
     return relabeled_image.to(device), new_labels.to(device), filtered_tensors
+
+
+def relabel_and_filter(masks: torch.Tensor, original_labels: torch.Tensor, *tensors_to_filter):
+    """
+    Version optimisée utilisant une Look-Up Table (LUT) pour une relabellisation instantanée.
+    """
+    device = masks.device
+
+    # 1. Extraire les labels uniques présents dans le masque
+    unique_labels = torch.unique(masks)
+    unique_labels = unique_labels[unique_labels != 0] # On ignore le fond
+
+    if unique_labels.numel() == 0:
+        return masks, torch.tensor([], device=device), [t[:0] for t in tensors_to_filter]
+
+    # 2. Créer le mapping des indices pour filtrer les tenseurs (scores, masses, etc.)
+    # On cherche où se trouvent les unique_labels dans original_labels
+    sorted_orig, sorted_idx = torch.sort(original_labels)
+    # On trouve la position des labels présents dans le tenseur trié
+    pos = torch.searchsorted(sorted_orig, unique_labels)
+
+    # Vérification : tous les labels présents dans l'image doivent exister dans original_labels
+    # Clamp pos to valid indices before accessing sorted_orig
+    pos_clipped = torch.clamp(pos, max=sorted_orig.numel() - 1)
+    mask_valid = (pos < sorted_orig.numel()) & (sorted_orig[pos_clipped] == unique_labels)
+    if not torch.all(mask_valid):
+        missing_label = unique_labels[~mask_valid][0].item()
+        raise ValueError(f"Label {missing_label} présent dans le masque mais absent de original_labels")
+
+    mapping_indices = sorted_idx[pos]
+
+    # 3. Relabellisation
+    max_label = int(unique_labels.max().item())
+    lut = torch.zeros(max_label + 1, dtype=masks.dtype, device=device)
+
+    new_labels = torch.arange(1, len(unique_labels) + 1, device=device, dtype=masks.dtype)
+    lut[unique_labels.long()] = new_labels
+
+    # On applique la LUT d'un coup sur toute l'image
+    relabeled_image = lut[masks.long()]
+
+    # 4. Filtrage des tenseurs additionnels
+    filtered_tensors = [t[mapping_indices] for t in tensors_to_filter]
+
+    return relabeled_image, new_labels, filtered_tensors
