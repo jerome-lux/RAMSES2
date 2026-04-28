@@ -349,7 +349,7 @@ def predict(
                 draw_boundaries=True,
                 showtext=True,
                 drawrect=True,
-                mode="class",
+                mode="instance",
                 alpha=0.3,
                 boundary_mode=kwargs.get("boundary_mode", "inner"),
                 fontscale=kwargs.get("fontscale", 2),
@@ -368,7 +368,7 @@ def predict(
                 box = prop["bbox"]
 
                 data["baseimg"].append(imgname)
-                data["label"].append(labels[i])
+                data["label"].append(final_labels[i])
                 data["res"].append(resolution)
                 data["x0"].append(box[0])
                 data["x1"].append(box[2])
@@ -414,6 +414,83 @@ def predict(
     return data
 
 
+# def single_image_prediction(
+#     input_image,
+#     model,
+#     thresholds=(0.5, 0.5, 0.5),
+#     max_detections=400,
+#     minarea=MINAREA,
+#     weight_by_scores=False,
+#     device="cuda:0",
+# ):
+#     nx, ny = input_image.shape[:2]  # Note: image can be padded or cropped
+#     input_tensor = torch.from_numpy(input_image.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).float()
+#     input_tensor = input_tensor.to(device)
+
+#     results = model(
+#         input_tensor,
+#         training=False,
+#         cls_threshold=thresholds[0],
+#         nms_threshold=thresholds[2],  # iou threshold or cls threshold in MatrixNMX
+#         mask_threshold=thresholds[1],  # threshold to apply to the masks
+#         max_detections=max_detections,
+#         scale_by_mask_scores=weight_by_scores,
+#         min_area=minarea,
+#         nms_mode="greedy",
+#     )[
+#         0
+#     ]  # take the first element of the batch (because batch size = 1 here)
+
+#     pred_masks = results["masks"].detach()  # [Npred, H, W]
+#     pred_masses = results["masses"].detach()  # [Npred]
+#     pred_cls_ids = results["cls_labels"].detach() + 1  # [Npred]
+#     pred_scores = results["scores"].detach()  # [Npred]
+
+#     # get labeled image: [H, W]
+#     labeled_image = decode_predictions(pred_masks, pred_scores, threshold=0.5, by_mask_scores=False)
+#     labeled_image = labeled_image.cpu().numpy().astype(int)
+#     mask_stride = nx // labeled_image.shape[0]
+#     # Resize to input size (not fullsize because it's too big!) and delete padding
+#     resized_labeled_image = sk.transform.resize(labeled_image, (nx, ny), order=0)
+
+#     final_labels = np.unique(resized_labeled_image)[1:]
+#     if final_labels.size == 0:
+#         return None, None, None, None, None, None
+#     final_indexes = final_labels - 1
+#     # final_labels may be non consecutive or some slices may be empty -> all pixel values are < seg_threshold
+#     if final_labels.size != torch.numel(pred_cls_ids):
+#         pred_scores = pred_scores[final_indexes]
+#         pred_cls_ids = pred_cls_ids[final_indexes]
+#         pred_masses = pred_masses[final_indexes]
+#     if np.max(final_indexes) > torch.numel(pred_cls_ids):
+#         resized_labeled_image, final_labels, (pred_scores, pred_cls_ids, pred_masses) = relabel_and_filter(
+#             torch.from_numpy(resized_labeled_image),
+#             torch.from_numpy(final_labels),
+#             pred_scores,
+#             pred_cls_ids,
+#             pred_masses,
+#         )
+#         resized_labeled_image = resized_labeled_image.numpy()
+#         final_labels = final_labels.numpy()
+
+#     if torch.numel(pred_scores) <= 0:  # No detection !
+#         return None, None, None, None, None, None
+
+#     region_properties = regionprops(
+#         resized_labeled_image, extra_properties=(max_inscribed_radius_func, min_feret_diameter_func)
+#     )
+
+#     return (
+#         region_properties,
+#         resized_labeled_image,
+#         pred_cls_ids.cpu(),
+#         pred_masses.cpu(),
+#         pred_scores.cpu(),
+#         mask_stride,
+#     )
+
+
+@torch.no_grad()
 def single_image_prediction(
     input_image,
     model,
@@ -423,67 +500,93 @@ def single_image_prediction(
     weight_by_scores=False,
     device="cuda:0",
 ):
-    nx, ny = input_image.shape[:2]  # Note: image can be padded or cropped
-    input_tensor = torch.from_numpy(input_image.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).float()
-    input_tensor = input_tensor.to(device)
+    nx, ny = input_image.shape[:2]
 
+    # Passage en tenseur et envoi sur le device
+    input_tensor = torch.from_numpy(input_image.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).to(device)
+
+    # Inférence
     results = model(
         input_tensor,
         training=False,
         cls_threshold=thresholds[0],
-        nms_threshold=thresholds[2],  # iou threshold or cls threshold in MatrixNMX
-        mask_threshold=thresholds[1],  # threshold to apply to the masks
+        nms_threshold=thresholds[2],
+        mask_threshold=thresholds[1],
         max_detections=max_detections,
         scale_by_mask_scores=weight_by_scores,
         min_area=minarea,
         nms_mode="greedy",
-    )[
-        0
-    ]  # take the first element of the batch (because batch size = 1 here)
+    )[0]
 
-    pred_masks = results["masks"].detach()  # [Npred, H, W]
-    pred_masses = results["masses"].detach()  # [Npred]
-    pred_cls_ids = results["cls_labels"].detach() + 1  # [Npred]
-    pred_scores = results["scores"].detach()  # [Npred]
-
-    # get labeled image: [H, W]
-    labeled_image = decode_predictions(pred_masks, pred_scores, threshold=0.5, by_mask_scores=False)
-    labeled_image = labeled_image.cpu().numpy().astype(int)
-    mask_stride = nx // labeled_image.shape[0]
-    # Resize to input size (not fullsize because it's too big!) and delete padding
-    resized_labeled_image = sk.transform.resize(labeled_image, (nx, ny), order=0)
-
-    final_labels = np.unique(resized_labeled_image)[1:]
-    final_indexes = final_labels - 1
-    # final_labels may be non consecutive or some slices may be empty -> all pixel values are < seg_threshold
-    if final_labels.size != torch.numel(pred_cls_ids):
-        pred_scores = pred_scores[final_indexes]
-        pred_cls_ids = pred_cls_ids[final_indexes]
-        pred_masses = pred_masses[final_indexes]
-    if np.max(final_indexes) > torch.numel(pred_cls_ids):
-        resized_labeled_image, final_labels, (pred_scores, pred_cls_ids, pred_masses) = relabel_and_filter(
-            torch.from_numpy(resized_labeled_image),
-            torch.from_numpy(final_labels),
-            pred_scores,
-            pred_cls_ids,
-            pred_masses,
-        )
-        resized_labeled_image = resized_labeled_image.numpy()
-        final_labels = final_labels.numpy()
-
-    if torch.numel(pred_scores) <= 0:  # No detection !
+    if results["scores"].numel() == 0:
         return None, None, None, None, None, None
 
+    # Extraction des prédictions (on garde sur GPU pour l'instant)
+    pred_masks = results["masks"].detach()
+    pred_masses = results["masses"].detach()
+    pred_cls_ids = results["cls_labels"].detach() + 1
+    pred_scores = results["scores"].detach()
+
+    # Décodage des masques en une image de labels [H, W]
+    labeled_image = decode_predictions(pred_masks, pred_scores, threshold=0.5, by_mask_scores=False)
+
+    # Calcul du stride (ratio entre taille réseau et taille masque)
+    mask_stride = nx // labeled_image.shape[0]
+
+    # Redimensionnement des labels à la taille d'entrée (nx, ny)
+    # On utilise order=0 (nearest neighbor) pour ne pas créer de nouveaux labels interpolés
+    # On travaille en numpy pour sk.transform, puis on repasse en torch pour le filtrage
+    labeled_image_np = labeled_image.cpu().numpy().astype(np.int32)
+    resized_labeled_image_np = sk.transform.resize(
+        labeled_image_np, (nx, ny), order=0, preserve_range=True, anti_aliasing=False
+    ).astype(np.int32)
+
+    # Récupération des labels réellement présents après le resize
+    # (Certains objets très petits ont pu disparaître)
+    final_labels = np.unique(resized_labeled_image_np)
+    final_labels = final_labels[final_labels > 0] # On exclut le fond (0)
+
+    if final_labels.size == 0:
+        return None, None, None, None, None, None
+
+    # --- ÉTAPE CRUCIALE : RELABEL ET FILTRAGE ---
+    # On crée des tenseurs "originaux" qui correspondent aux IDs 1, 2, 3... N
+    # pour que relabel_and_filter puisse faire le mapping correctement.
+    original_ids = torch.arange(1, pred_scores.size(0) + 1, device=device)
+
+    # On appelle ta fonction relabel_and_filter
+    # Elle va :
+    # 1. Transformer les labels (ex: 52) en labels consécutifs (ex: 51)
+    # 2. Filtrer les scores/masses/classes pour ne garder que les bons indices
+    resized_labeled_image_torch, new_labels, filtered_tensors = relabel_and_filter(
+        torch.from_numpy(resized_labeled_image_np).to(device),
+        original_ids,
+        pred_scores,
+        pred_cls_ids,
+        pred_masses
+    )
+
+    # Extraction des tenseurs filtrés
+    f_scores, f_cls_ids, f_masses = filtered_tensors
+
+    # On repasse l'image en numpy pour skimage regionprops
+    final_labeled_image = resized_labeled_image_torch.cpu().numpy().astype(np.int32)
+
+    if f_scores.numel() == 0:
+        return None, None, None, None, None, None
+
+    # Calcul des propriétés géométriques
     region_properties = regionprops(
-        resized_labeled_image, extra_properties=(max_inscribed_radius_func, min_feret_diameter_func)
+        final_labeled_image,
+        extra_properties=(max_inscribed_radius_func, min_feret_diameter_func)
     )
 
     return (
         region_properties,
-        resized_labeled_image,
-        pred_cls_ids.cpu(),
-        pred_masses.cpu(),
-        pred_scores.cpu(),
+        final_labeled_image,
+        f_cls_ids.cpu(),
+        f_masses.cpu(),
+        f_scores.cpu(),
         mask_stride,
     )
 
@@ -525,7 +628,7 @@ def stream_predict(
         bgcolor (tuple or int, optional): Background color value for padding and filtering. Defaults to BGCOLOR.
         minarea (int, optional): Minimum area for detected objects. Defaults to MINAREA.
         subdirs (bool, optional): Whether to search for images recursively in subdirectories. Defaults to True.
-        save_imgs (bool, optional): Whether to save visualization images and labels. Defaults to True.
+        save_imgs (bool, optional): Whether to save visualization images and labels. Defaults to "class"
         device (str, optional): Device for model inference (e.g., "cuda:0" or "cpu"). Defaults to "cuda:0".
 
     Returns:
@@ -777,21 +880,24 @@ def stream_predict(
             elif save_imgs == "class":
                 if idx_to_cls is not None:
                     classes = [idx_to_cls.get(x, "UNKNOWN") for x in pred_cls_ids.tolist()]
-                vizu = draw_instances(
-                    resized_image,
-                    middle_masks,
-                    cls_ids=classes,
-                    bboxes=middle_pred_boxes,
-                    draw_boundaries=True,
-                    showtext=True,
-                    drawrect=True,
-                    mode="class",
-                    alpha=0.3,
-                    boundary_mode=kwargs.get("boundary_mode", "inner"),
-                    fontscale=kwargs.get("fontscale", 2),
-                )
-                vizuname = "VIZU-{}.jpg".format(os.path.splitext(imgname)[0])
-                Image.fromarray(vizu).save(os.path.join(VIZU_DIR, vizuname))
+                try:
+                    vizu = draw_instances(
+                        resized_image,
+                        middle_masks,
+                        cls_ids=classes,
+                        bboxes=middle_pred_boxes,
+                        draw_boundaries=True,
+                        showtext=True,
+                        drawrect=True,
+                        mode="class",
+                        alpha=0.3,
+                        boundary_mode=kwargs.get("boundary_mode", "inner"),
+                        fontscale=kwargs.get("fontscale", 2),
+                    )
+                    vizuname = "VIZU-{}.jpg".format(os.path.splitext(imgname)[0])
+                    Image.fromarray(vizu).save(os.path.join(VIZU_DIR, vizuname))
+                except Exception as e:
+                    print(f"Error f{e}")
 
         else:
             # print(", all detected instances touch the edges")
@@ -846,6 +952,7 @@ def stream_predict(
 
                 PILimg = Image.open(os.path.join(OVERLAPPING_IMGS_DIR, o_imgname))
                 overlap_image = np.array(PILimg) / 255.0
+                overlap_image = overlap_image.astype(np.float32)
 
                 # Get predictions on the overlap image
                 (
@@ -864,7 +971,6 @@ def stream_predict(
                     weight_by_scores=weight_by_scores,
                     device=device,
                 )
-
                 if o_pred_cls_ids is None:
                     print("No instance detected !")
                     continue
@@ -909,7 +1015,7 @@ def stream_predict(
                 data["min_feret_diameter"].extend(min_feret_diameter.tolist())
                 data["max_inscribed_radius"].extend(max_inscribed_radius.tolist())
 
-                if save_imgs:
+                if save_imgs == 'instances':
                     vizuname = "VIZU-{}.jpg".format(os.path.splitext(o_imgname)[0])
                     bd = sk.segmentation.find_boundaries(
                         o_resized_labeled_image, connectivity=2, mode="inner", background=0
@@ -927,6 +1033,7 @@ def stream_predict(
                     Image.fromarray(vizu).save(os.path.join(VIZU_DIR, vizuname))
 
                 elif save_imgs == "class":
+                    vizuname = "VIZU-{}.jpg".format(os.path.splitext(o_imgname)[0])
                     vizu = draw_instances(
                         overlap_image,
                         o_resized_labeled_image,
@@ -940,6 +1047,8 @@ def stream_predict(
                         boundary_mode=kwargs.get("boundary_mode", "inner"),
                         fontscale=kwargs.get("fontscale", 2),
                     )
+                    Image.fromarray(vizu).save(os.path.join(VIZU_DIR, vizuname))
+
 
         # paramètres utilisés dans l'itération suivante
         # bottom_labels = labels[bottom_indexes]
