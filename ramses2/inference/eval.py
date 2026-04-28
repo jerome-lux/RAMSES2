@@ -57,6 +57,8 @@ def evaluate(
     heights = {annotations.iloc[i]["baseimg"]: annotations.iloc[i]["height"] for i in unique_indexes}
     widths = {annotations.iloc[i]["baseimg"]: annotations.iloc[i]["width"] for i in unique_indexes}
 
+    total_raw_pred_mass_per_cls = {name: 0.0 for name in ids_to_cls.values()}
+
     gt_accumulator = 0
     total_gt_mass_per_cls = {}
 
@@ -68,6 +70,12 @@ def evaluate(
     pred_masses_list = []
     gt_cls_labels_list = []
     gt_mass_per_pred = []
+    # list to keep the unmatched prediction
+    all_pred_score_list = []
+    all_pred_cls_labels_list = []
+
+    # To save results per image
+    per_image_results = {}
 
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=1, shuffle=shuffle, num_workers=2, collate_fn=collate_fn, pin_memory=True
@@ -96,7 +104,7 @@ def evaluate(
             try:
                 if isfinite_gt_mass[j]:
                     total_gt_mass_per_cls[cls_ids_np[j]] = (
-                        total_gt_mass_per_cls.get(cls_ids_np[j], 0.0) + gt_mass[j] / scaling
+                        total_gt_mass_per_cls.get(cls_ids_np[j], 0.0) + gt_mass[j].item() / scaling
                     )
             except Exception as e:
                 print("Error", e)
@@ -129,6 +137,17 @@ def evaluate(
             gt_cls_labels_list.append(gt_cls_ids)
             continue
 
+        # Raw predictions (for all positive/negative detections) vs gt mass
+
+        for j in range(pred_masses.shape[0]):
+            cls_id = pred_cls_ids[j].item()
+            cls_name = ids_to_cls.get(cls_id, "UNKNOWN")
+            if cls_name != "UNKNOWN":
+                total_raw_pred_mass_per_cls[cls_name] = (
+                    total_raw_pred_mass_per_cls.get(cls_name, 0.0) + (pred_masses[j].item() / scaling)
+                )
+
+
         gt_masks = F.one_hot(gt_mask_img, ngt + 1)[..., 1:]
         gt_masks = torch.reshape(gt_masks, (-1, ngt))
         gt_masks = torch.transpose(gt_masks, 1, 0).float()  # [Ngt, H*W]
@@ -137,10 +156,35 @@ def evaluate(
         pred_masks = torch.reshape(pred_masks, (pred_masks.shape[0], -1)).float()  # [Npred, H*W]
 
         total_pred_mass_per_cls_np = pred_masses / scaling
+
+        per_image_results[imgname] = {
+            "gt_masses": {name: 0.0 for name in ids_to_cls.values()},
+            "pred_masses": {name: 0.0 for name in ids_to_cls.values()},
+            "total_pred_mass": pred_masses.sum().item() / scaling,
+            "total_gt_mass": gt_mass.sum().item() / scaling,
+            "ngt": gt_cls_ids.size(0),
+            "npred": pred_cls_ids.size(0),
+            "RE": (pred_masses.sum().item() - gt_mass.sum().item()) / gt_mass.sum().item()
+        }
+
+        for j in range(len(gt_cls_ids)):
+            cls_name = ids_to_cls.get(gt_cls_ids[j].item(), "UNKNOWN")
+            if cls_name in per_image_results[imgname]["gt_masses"]:
+                per_image_results[imgname]["gt_masses"][cls_name] += (gt_mass[j].item() / scaling)
+
+        for j in range(len(pred_cls_ids)):
+            cls_name = ids_to_cls.get(pred_cls_ids[j].item(), "UNKNOWN")
+            # On ajoute même si la classe est "UNKNOWN" (ou une classe prédite non présente en GT)
+            if cls_name not in per_image_results[imgname]["pred_masses"]:
+                per_image_results[imgname]["pred_masses"][cls_name] = 0.0
+            per_image_results[imgname]["pred_masses"][cls_name] += (pred_masses[j].item() / scaling)
+
         cls_unique = np.unique(cls_ids_np)
         cls_unique = [ids_to_cls.get(c, "UNKNOWN") for c in cls_unique]
         pred_cls_unique = np.unique(pred_cls_ids.cpu().numpy())
         pred_cls_unique = [ids_to_cls.get(c, "UNKNOWN") for c in pred_cls_unique]
+
+
         if verbose:
             # print(" "*500, end="\r")
             print(
@@ -194,20 +238,22 @@ def evaluate(
             gt_cls_labels_list.append(gt_cls_ids)
             print("No matching predictions for this image.")
             continue
-        # 2. Obtenir les indices des GT correspondants pour ces prédictions valides
+        # Obtenir les indices des GT correspondants pour ces prédictions valides
         valid_gt_indices_to_gather = final_gt_matches[valid_pred_indices]
 
         TPFP_per_pred.append(
             torch.where(final_iou_values > iou_threshold, 1, 0)
         )  # matching masks (class may not match)
         iou_per_pred.append(final_iou_values)
-        # On doit filter les tenseurs pour ne garder que les prédictions valides (matching masks)
+        # On doit filtrer les tenseurs pour ne garder que les prédictions valides (matching masks)
         gt_cls_labels_per_pred.append(torch.gather(gt_cls_ids, 0, valid_gt_indices_to_gather))
         pred_cls_labels_list.append(torch.gather(pred_cls_ids.cpu(), 0, valid_pred_indices))
         pred_scores_list.append(torch.gather(pred_scores.cpu(), 0, valid_pred_indices))
         pred_masses_list.append(torch.gather(pred_masses.cpu(), 0, valid_pred_indices) / scaling)
         gt_cls_labels_list.append(gt_cls_ids)
         gt_mass_per_pred.append(torch.gather(gt_mass, 0, valid_gt_indices_to_gather) / scaling)
+        all_pred_score_list.append(pred_scores.cpu())
+        all_pred_cls_labels_list.append(pred_cls_ids)
 
     TPFP_per_pred = torch.concat(TPFP_per_pred, dim=0)
     pred_cls_labels_list = torch.concat(pred_cls_labels_list, dim=0)
@@ -217,6 +263,8 @@ def evaluate(
     gt_cls_labels_list = torch.concat(gt_cls_labels_list, dim=0)
     gt_mass_per_pred = torch.concat(gt_mass_per_pred, dim=0)
     iou_per_pred = torch.concat(iou_per_pred, dim=0)
+    all_pred_score_list = torch.concat(all_pred_score_list, dim=0)
+    all_pred_cls_labels_list = torch.concat(all_pred_cls_labels_list, dim=0)
     print("")
 
     # Sort predictions by score
@@ -257,7 +305,7 @@ def evaluate(
             sorted_TPFP_per_pred_per_cls = sorted_TPFP_per_pred
             scores_cls = sorted_scores
         else:
-            n_gt_instances = gt_count_per_cls[i]
+            n_gt_instances = gt_count_per_cls[i].item()
             indexes = torch.where(sorted_pred_cls_labels == cls_id)
             if indexes[0].numel() == 0:
                 print("No instance of class", cls_id, "found in predictions")
@@ -287,12 +335,17 @@ def evaluate(
             )
             # mass_indexes = torch.where(torch.isfinite(sorted_gt_masses_per_pred))
             mass_mask = torch.isfinite(sorted_gt_masses_per_pred) & (sorted_iou_per_pred > iou_threshold)
+            filtered_raw_pred_mass = np.sum(
+                [m for c, m in total_raw_pred_mass_per_cls.items() if c not in exclude]
+            )
+            #
         else:
             key = ids_to_cls.get(cls_id, "UNKNOWN")
             filtered_total_gt_mass_per_cls = total_gt_mass_per_cls.get(cls_id, np.nan)
             # mass_indexes = torch.where(
             #     (sorted_gt_cls_labels_per_pred == cls_id) & (torch.isfinite(sorted_gt_masses_per_pred))
             # )
+            filtered_raw_pred_mass = total_raw_pred_mass_per_cls.get(key, np.nan)
             mass_mask = (
                 (sorted_gt_cls_labels_per_pred == cls_id)
                 & torch.isfinite(sorted_gt_masses_per_pred)
@@ -329,20 +382,47 @@ def evaluate(
             "scores": scores_cls.cpu().numpy(),
             "iou": iou_per_cls.cpu().numpy(),
             "TPFP": sorted_TPFP_per_pred_per_cls.cpu().numpy(),
-            "MassMAPE": MMAPE.cpu().numpy(),
-            "MassMAE": MAE.cpu().numpy(),
+            "MassMAPE": MMAPE.item(),
+            "MassMAE": MAE.item(),
             "TotalMassMAPE": TMAPE,
             "TotalMassError": TME,
             "GTMass": filtered_total_gt_mass_per_cls,
-            "PREDMass": total_pred_masses_pos,
+            "RawPREDMass": filtered_raw_pred_mass,
+            "PosPREDMass": total_pred_masses_pos,
+            "RawREMass": (filtered_raw_pred_mass - filtered_total_gt_mass_per_cls) / (filtered_total_gt_mass_per_cls + 1e-10)
         }
 
-    print("class |  AP  | count | Mass MAPE | Mass MAE | TotalMassMAPE | GT Mass | Pred Mass")
+    # Now process the predictions where the class is not in the GT classes
+    fp_cls_ids = [cls_id for cls_id in all_pred_cls_labels_list.detach().cpu().numpy().tolist() if cls_id not in cls_ids]
+    for cls_id in fp_cls_ids:
+        indexes = torch.where(all_pred_cls_labels_list.cpu() == cls_id)
+        key = ids_to_cls.get(cls_id, "UNKNOWN")
+        scores = all_pred_score_list[indexes]
+
+        results[key] = {
+            "AP": np.nan,
+            "precision": [np.nan],
+            "recall": [np.nan],
+            "count": indexes[0].numel(),
+            "scores": scores.cpu().numpy(),
+            "iou": [0],
+            "TPFP": [np.nan],
+            "MassMAPE": np.nan,
+            "MassMAE": np.nan,
+            "TotalMassMAPE": np.nan,
+            "TotalMassError": np.nan,
+            "GTMass": 0.,
+            "RawPREDMass": total_raw_pred_mass_per_cls.get(key, np.nan),
+            "PosPREDMass": 0.,
+            "RawREMass": np.nan
+        }
+
+    print("class |  AP  | count | Mass MAPE | Mass MAE | TotalMassMAPE | GT Mass | Pred Mass | Raw Pred Mass | Raw RE")
     for cls_id, val in results.items():
         print(
             f"{cls_id:5s} | {val['AP']:.3f} | {val['count']:5d} |  "
             f"{val['MassMAPE']*100: ^5.2f}%  | {val['MassMAE']: ^8.2f} | {val['TotalMassMAPE']*100: >12.2f}% "
-            f"| {val['GTMass']: ^8.2f} | {val['PREDMass']: ^8.2f}"
+            f"| {val['GTMass']: ^8.2f} | {val['PosPREDMass']: ^10.2f} | {val['RawPREDMass']: ^10.2f} | {100*val['RawREMass']: ^10.2f}%"
         )
 
-    return results, total_gt_mass_per_cls
+    return results, total_gt_mass_per_cls, per_image_results
