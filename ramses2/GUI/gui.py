@@ -19,6 +19,7 @@ from mpl_interactions import zoom_factory, panhandler
 from itertools import cycle
 from pathlib import Path
 import configparser
+import torch
 
 from ramses2.utils.utils import crop_to_aspect_ratio, pad_to_aspect_ratio
 from ramses2.inference import predict, stream_predict
@@ -33,30 +34,93 @@ COLORS = {"Ra": "dimgray", "Rb": "orange", "Rc": "lightblue", "Ru": "yellow", "R
 
 CONFIG_PATH = os.path.expanduser("~") / Path(".config/ramses/ramses.ini")
 
-configini = configparser.ConfigParser()
-configini.read(CONFIG_PATH)
+class ConfigHandler:
+    def __init__(self, filename=CONFIG_PATH):
+        self.filename = filename
+        # Initial default values
+        self.config = {"input_folder": os.path.expanduser("~")}
+        self.parameters = {
+            "score_threshold": 0.5,
+            "mask_threshold": 0.5,
+            "nms_threshold": 0.25,
+            "crop_to_aspect_ratio": True,
+            "network_input_height": 2048,
+            "network_input_width": 3072,
+            "min_area": 16,
+            "max_instances": 768,
+            "max_view_size": 1024,
+            "device": "cuda"
+        }
+        if filename is not None:
+            self.load_parameters()
 
+    def save_parameters(self):
+        """Write current parameters to the .ini file."""
+        config = configparser.ConfigParser()
+        config['SETTINGS'] = {k: str(v) for k, v in self.parameters.items()}
+        config['CONFIG'] = {k: str(v) for k, v in self.config.items()}
 
-def update_config(config):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as configfile:
-        config.write(configfile)
+        with open(self.filename, 'w') as configfile:
+            config.write(configfile)
+        print(f"Configuration created/updated: {self.filename}")
 
+    def load_parameters(self):
+        """Load from file or create it with defaults if missing."""
+        config = configparser.ConfigParser()
 
-try:
-    INPUT_FOLDER = Path(configini["config"]["input_folder"])
-except KeyError:
-    configini["config"] = {"input_folder": os.path.expanduser("~")}
-    INPUT_FOLDER = os.path.expanduser("~")
-    update_config(configini)
+        # Check if file exists AND contains the required section
+        if not os.path.exists(self.filename):
+            print("File missing. Generating default config...")
+            self.save_parameters()
+            return
+
+        config.read(self.filename)
+
+        if 'SETTINGS' not in config:
+            print("Section [SETTINGS] missing. Rebuilding file...")
+            self.save_parameters()
+            return
+
+        if 'CONFIG' not in config:
+            print("Section [CONFIG] missing. Rebuilding file...")
+            self.save_parameters()
+            return
+
+        try:
+            self.config["input_folder"] = config['CONFIG'].get("input_folder", os.path.expanduser("~"))
+            self.config["device"] = config['CONFIG'].get("device", "cuda")
+            print("Config loaded successfully.")
+        except ValueError as e:
+            # Fallback if a value in the file is corrupted (e.g. text instead of int)
+            print(f"Error parsing values: {e}. Using current defaults.")
+
+        # If we reach here, the section exists, so we parse it
+        s = config['SETTINGS']
+        try:
+            # Type-safe parsing
+            self.parameters["score_threshold"] = s.getfloat("score_threshold", 0.5)
+            self.parameters["mask_threshold"] = s.getfloat("mask_threshold", 0.5)
+            self.parameters["nms_threshold"] = s.getfloat("nms_threshold", 0.25)
+            self.parameters["crop_to_aspect_ratio"] = s.getboolean("crop_to_aspect_ratio", True)
+            self.parameters["network_input_height"] = s.getint("network_input_height", 2048)
+            self.parameters["network_input_width"] = s.getint("network_input_width", 3072)
+            self.parameters["min_area"] = s.getint("min_area", 16)
+            self.parameters["max_instances"] = s.getint("max_instances", 768)
+            self.parameters["max_view_size"] = s.getint("max_view_size", 1024)
+            self.parameters["device"] = s.get("device", "cuda")
+            print("Parameters loaded successfully.")
+        except ValueError as e:
+            # Fallback if a value in the file is corrupted (e.g. text instead of int)
+            print(f"Error parsing values: {e}. Using current defaults.")
 
 
 class SetParams(tk.Toplevel):
 
-    def __init__(self, parent, params, **kwargs):
+    def __init__(self, parent, params, config_manager, **kwargs):
         super().__init__(parent)
         self.config(width=400, height=400)
         self.title("Properties")
-
+        self.config_manager = config_manager
         self.params = params
         self.tk_params = {
             "score_threshold": tk.DoubleVar(),
@@ -65,10 +129,10 @@ class SetParams(tk.Toplevel):
             "crop_to_aspect_ratio": tk.BooleanVar(),
             "network_input_height": tk.IntVar(),
             "network_input_width": tk.IntVar(),
-            # "from_stream": tk.BooleanVar(),
             "min_area": tk.IntVar(),
             "max_instances": tk.IntVar(),
             "max_view_size": tk.IntVar(),
+            "device": tk.StringVar()
         }
 
         for k, v in self.params.items():
@@ -96,12 +160,7 @@ class SetParams(tk.Toplevel):
         tk.Radiobutton(self, text="True", variable=self.tk_params["crop_to_aspect_ratio"], value=True).grid(
             column=2, row=1, sticky="EWSN", padx=5
         )
-        # tk.Radiobutton(self, text="False", variable=self.tk_params["from_stream"], value=False).grid(
-        #     column=1, row=2, sticky="EWSN", padx=5
-        # )
-        # tk.Radiobutton(self, text="True", variable=self.tk_params["from_stream"], value=True).grid(
-        #     column=2, row=2, sticky="EWSN", padx=5
-        # )
+
         tk.Entry(master=self, textvariable=self.tk_params["score_threshold"]).grid(
             column=1, row=2, sticky="EWSN", padx=5
         )
@@ -113,11 +172,18 @@ class SetParams(tk.Toplevel):
         tk.Entry(master=self, textvariable=self.tk_params["max_instances"]).grid(column=1, row=6, sticky="EWSN", padx=5)
         tk.Entry(master=self, textvariable=self.tk_params["max_view_size"]).grid(column=1, row=7, sticky="EWSN", padx=5)
 
+        tk.Radiobutton(self, text="CPU", variable=self.tk_params["device"], value="cpu").grid(
+            column=1, row=8, sticky="EWSN", padx=5
+        )
+        tk.Radiobutton(self, text="GPU", variable=self.tk_params["device"], value="cuda").grid(
+            column=2, row=8, sticky="EWSN", padx=5
+        )
+
         self.save_button = ttk.Button(self, text="Save", command=lambda: self.save())
-        self.save_button.grid(column=0, row=8, sticky="EWSN", padx=5)
+        self.save_button.grid(column=0, row=9, sticky="EWSN", padx=5)
 
         self.button_close = ttk.Button(self, text="Close without saving", command=self.close)
-        self.button_close.grid(column=1, row=8, columnspan=2, sticky="EWSN", padx=5)
+        self.button_close.grid(column=1, row=9, columnspan=2, sticky="EWSN", padx=5)
 
         self.focus()
         self.grab_set()
@@ -125,6 +191,7 @@ class SetParams(tk.Toplevel):
     def save(self):
         for k, v in self.tk_params.items():
             self.params[k] = v.get()
+        self.config_manager.save_parameters()
         self.destroy()
         self.update()
 
@@ -154,8 +221,12 @@ class ramsesGUI:
         self.treeview_style.configure("My.Treeview", font=("Helvetica", 12))
         self.treeview_style.configure("My.Treeview.Heading", background="grey", font=("Helvetica", 12, "bold"))
 
+        # config
+        self.config_manager = ConfigHandler(CONFIG_PATH)
+        print(self.config_manager.config)
+
         # Variables
-        self.input_dir = INPUT_FOLDER
+        self.input_dir = self.config_manager.config['input_folder']
         self.input_dir_var = tk.StringVar()
         self.input_dir_var.set(str(self.input_dir))
         self.resolution = tk.DoubleVar()
@@ -164,18 +235,10 @@ class ramsesGUI:
         self.mode = tk.StringVar()
         self.mode.set("Gestion des objets \n touchants les bords :\n Non")
         self.border_detection = False
-        self.parameters = {
-            "score_threshold": 0.5,
-            "mask_threshold": 0.5,
-            "nms_threshold": 0.25,
-            "crop_to_aspect_ratio": True,
-            "network_input_height": 2048,
-            "network_input_width": 3072,
-            # "from_stream": False,
-            "min_area": 16,
-            "max_instances": 768,
-            "max_view_size": DEFAULT_IMG_SIZE,
-        }
+        self.nb_aggregates_var = tk.StringVar()
+        self.nb_aggregates_var.set("n/a")
+        self.parameters = self.config_manager.parameters
+        self.device = self.config_manager.parameters['device']
         # Init other variables
         self.reset()
 
@@ -195,7 +258,7 @@ class ramsesGUI:
         # Input folder selection and resolution
         Y = 0.1
         self.input_frame = ttk.Frame(self.root)
-        self.input_frame.place(relx=0, rely=0, relwidth=0.8, relheight=Y)  # (side=tk.TOP, fill=tk.X, expand=1)
+        self.input_frame.place(relx=0, rely=0, relwidth=1, relheight=Y)  # (side=tk.TOP, fill=tk.X, expand=1)
 
         self.input_dir_button = ttk.Button(
             self.input_frame, text="Choix du répertoire", command=lambda: self.select_input_dir()
@@ -213,7 +276,12 @@ class ramsesGUI:
         self.resolution_entry.grid(column=1, row=1, sticky="EWSN", padx=5)
 
         self.pred_button = ttk.Button(self.input_frame, width=15, text="Predict", command=lambda: self.run_inference())
-        self.pred_button.grid(column=2, row=0, rowspan=2, sticky="EWSN", padx=5)
+        self.pred_button.grid(column=2, row=0, rowspan=2, sticky="EWSN", padx=5, ipadx=10) # Added ipadx for spacing
+
+        # Centered vertical alignment for "Nb Aggregates" label
+        ttk.Label(master=self.input_frame, text="Detected Aggregates", anchor="center", relief="solid", padding=(5,0)).grid(column=4, row=0, rowspan=2, sticky="ESN", padx=(20,5))
+        self.nb_aggregates_label = ttk.Label(master=self.input_frame, textvariable=self.nb_aggregates_var, relief="solid", borderwidth=1, background="white", width=10, anchor="center")
+        self.nb_aggregates_label.grid(column=5, row=0, rowspan=2, sticky="ESN", padx=5)
 
         # Notebook and tabs
         self.notebook = ttk.Notebook(self.root)
@@ -333,7 +401,7 @@ class ramsesGUI:
         self.init_img_list()
 
     def run_params_window(self):
-        SetParams(self.root, self.parameters)
+        SetParams(self.root, self.parameters, self.config_manager)
 
     def gui_load_model(self):
         file = tkFileDialog.askopenfilename(parent=self.root, initialdir=os.path.realpath(os.path.dirname(__file__)))
@@ -351,6 +419,12 @@ class ramsesGUI:
             self.current_image_fn = self.img_list[self.img_pointer]
             self.img = self.open_image(os.path.join(self.input_dir, self.current_image_fn), plot=True)
 
+        if self.annotations is not None:
+            current_image_annotations = self.annotations[self.annotations["baseimg"] == os.path.basename(self.current_image_fn)]
+            self.nb_aggregates_var.set(str(len(current_image_annotations)))
+        else:
+            self.nb_aggregates_var.set("n/a")
+
     def view_prev(self):
         self.img_pointer = self.previous()
 
@@ -362,6 +436,12 @@ class ramsesGUI:
         else:
             self.current_image_fn = self.img_list[self.img_pointer]
             self.img = self.open_image(os.path.join(self.input_dir, self.current_image_fn), plot=True)
+
+        if self.annotations is not None:
+            current_image_annotations = self.annotations[self.annotations["baseimg"] == os.path.basename(self.current_image_fn)]
+            self.nb_aggregates_var.set(str(len(current_image_annotations)))
+        else:
+            self.nb_aggregates_var.set("n/a")
 
     def switch_view(self):
         """plot the segmentation of the current image"""
@@ -557,9 +637,12 @@ class ramsesGUI:
             subdirs=False,
             boundary_mode="thick",
             save_imgs="class",
-            device="cuda:0",
+            device=self.device,
         )
         self.annotations, self.extended_preds, self.EN933_preds = gui_utils.process_predictions(results)
+        # Filter annotations for the current image
+        current_image_annotations = self.annotations[self.annotations["baseimg"] == os.path.basename(self.current_image_fn)]
+        self.nb_aggregates_var.set(str(len(current_image_annotations)))
 
         # Update class and granulometry plots
         progress_text.set("Computing granulometry...")
@@ -624,12 +707,12 @@ class ramsesGUI:
             self.reset()
 
     def select_input_dir(self):
-        self.input_dir = tkFileDialog.askdirectory(parent=self.root, initialdir=INPUT_FOLDER)
+        self.input_dir = tkFileDialog.askdirectory(parent=self.root, initialdir=self.input_dir)
 
         if self.input_dir:
             self.input_dir_var.set(self.input_dir)
-            configini["config"]["input_folder"] = self.input_dir
-            update_config(configini)
+            self.config_manager.config["input_folder"] = self.input_dir
+            self.config_manager.save_parameters()
             self.init_img_list()
 
     def next(self):
@@ -645,6 +728,7 @@ class ramsesGUI:
         self.annotations, self.extended_preds, self.EN933_preds = (None, None, None)
         self.segmentation_image = None
         self.detection_dir = None
+        self.nb_aggregates_var.set("n/a")
 
     def save(self):
         pass

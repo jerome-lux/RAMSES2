@@ -34,11 +34,11 @@ CLASS_CONVERSION = {
     "X03": "X",
     "X04": "X",
     "UNKNOWN": "X",
-    "Coin": "Coin",
+    "Coin": "X",
 }
 
 # SIEVES_ALL = [0, 0.063, 0.125, 0.25, 0.50, 1, 2, 4, 8, 10, 12.5, 16, 20, 31.5, 63]
-SIEVES = [0, 0.5, 1, 2, 4, 8, 10, 12.5, 16, 20, 31.5, 63, 100]
+SIEVES = [0, 0.125, 0.25, 0.5, 1, 2, 4, 8, 10, 12.5, 16, 20, 31.5, 63, 100]
 
 
 def compute_granulometry(dataframe, column, resolution):
