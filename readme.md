@@ -2,7 +2,7 @@
 
 RAMSES is a neural network model for instance segmentation and mass estimation of recycled aggregates in construction and demolition waste (CDW) images. It is based on the [SOLOv2](https://arxiv.org/pdf/2003.10152.pdf) instance segmentation model.
 
-The preprint is available [here](http://ssrn.com/abstract=5944061).
+The paper "Automated quality control of recycled aggregates via deep learning: A unified framework for instance segmentation and mass estimation" is available [here](https://doi.org/10.59400/mtr4151).
 
 <figure markdown>
     <img src="./images/model.jpg" alt="RAMSES architecture" width="75%" style="text-align:center">
