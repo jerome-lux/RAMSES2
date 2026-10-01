@@ -50,20 +50,82 @@ def compute_granulometry(dataframe, column, resolution):
     return h, b
 
 
-def load_model(checkpoint):
+def load_model(checkpoint: str, device: str = "cpu"):
+    """Load a PyTorch or PyTorch Lightning checkpoint into a RAMSESModel.
+
+    Parameters
+    ----------
+    checkpoint : str
+        Path to the model checkpoint file (.pt, .pth, or .ckpt).
+    device : str, optional
+        Device on which to map the loaded tensors (default is "cpu").
+
+    Returns
+    -------
+    tuple
+        A tuple containing:
+        - model (RAMSESModel): The model with loaded weights in eval mode.
+        - idx_to_cls (dict): Mapping from class index to class name.
+    """
     print(f"Opening {checkpoint}")
     folder = os.path.dirname(checkpoint)
-    with open(os.path.join(folder, "config.json"), "r", encoding="utf-8") as configfile:
+
+    # 1. Load model configuration
+    with open(
+        os.path.join(folder, "config.json"), "r", encoding="utf-8"
+    ) as configfile:
         config = json.load(configfile)
 
     model = RAMSESModel(Config(**config))
-    state_dict = torch.load(checkpoint)
-    model.load_state_dict(state_dict, strict=False)
 
-    with open(os.path.join(folder, "classes.json"), "r", encoding="utf-8") as classfile:
+    # 2. Load state dict safely
+    checkpoint_data = torch.load(
+        checkpoint, map_location=device, weights_only=True
+    )
+
+    # Detect if checkpoint is from PyTorch Lightning
+    if isinstance(checkpoint_data, dict) and "state_dict" in checkpoint_data:
+        state_dict_raw = checkpoint_data["state_dict"]
+    elif isinstance(checkpoint_data, dict):
+        state_dict_raw = checkpoint_data
+    else:
+        state_dict_raw = checkpoint_data
+
+    # Remove 'model.' prefix added by LightningModule
+    prefix = "model."
+    state_dict_cleaned = {
+        (k[len(prefix) :] if k.startswith(prefix) else k): v
+        for k, v in state_dict_raw.items()
+    }
+
+    model.load_state_dict(state_dict_cleaned, strict=False)
+    model.to(device)
+    model.eval()
+
+    # 3. Load class mapping
+    with open(
+        os.path.join(folder, "classes.json"), "r", encoding="utf-8"
+    ) as classfile:
         cls_to_idx = json.load(classfile)
+
     idx_to_cls = {v: k for k, v in cls_to_idx.items()}
+
     return model, idx_to_cls
+
+# def load_model(checkpoint):
+#     print(f"Opening {checkpoint}")
+#     folder = os.path.dirname(checkpoint)
+#     with open(os.path.join(folder, "config.json"), "r", encoding="utf-8") as configfile:
+#         config = json.load(configfile)
+
+#     model = RAMSESModel(Config(**config))
+#     state_dict = torch.load(checkpoint)
+#     model.load_state_dict(state_dict, strict=False)
+
+#     with open(os.path.join(folder, "classes.json"), "r", encoding="utf-8") as classfile:
+#         cls_to_idx = json.load(classfile)
+#     idx_to_cls = {v: k for k, v in cls_to_idx.items()}
+#     return model, idx_to_cls
 
 
 def get_img_list(input_dir):
