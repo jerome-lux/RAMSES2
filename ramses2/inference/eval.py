@@ -358,6 +358,11 @@ def evaluate(
 
         sorted_pred_masses_per_cls = sorted_pred_masses[mass_mask]
         sorted_gt_masses_per_pred_per_cls = sorted_gt_masses_per_pred[mass_mask]
+
+        instance_errors = torch.abs(sorted_pred_masses_per_cls - sorted_gt_masses_per_pred_per_cls) / (sorted_gt_masses_per_pred_per_cls + 1e-10)
+        outliers_50 = (instance_errors > 0.5).float().sum()
+        outlier_rate_50 = outliers_50 / (instance_errors.numel() + 1e-10)
+
         MAE = torch.abs(sorted_pred_masses_per_cls - sorted_gt_masses_per_pred_per_cls)
         MMAPE = torch.where(
             sorted_gt_masses_per_pred_per_cls != 0, MAE / sorted_gt_masses_per_pred_per_cls, torch.zeros_like(MAE)
@@ -389,7 +394,8 @@ def evaluate(
             "GTMass": filtered_total_gt_mass_per_cls,
             "RawPREDMass": filtered_raw_pred_mass,
             "PosPREDMass": total_pred_masses_pos,
-            "RawREMass": (filtered_raw_pred_mass - filtered_total_gt_mass_per_cls) / (filtered_total_gt_mass_per_cls + 1e-10)
+            "RawREMass": (filtered_raw_pred_mass - filtered_total_gt_mass_per_cls) / (filtered_total_gt_mass_per_cls + 1e-10),
+            "OutlierRate50": outlier_rate_50.item()
         }
 
     # Now process the predictions where the class is not in the GT classes
@@ -414,15 +420,17 @@ def evaluate(
             "GTMass": 0.,
             "RawPREDMass": total_raw_pred_mass_per_cls.get(key, np.nan),
             "PosPREDMass": 0.,
-            "RawREMass": np.nan
+            "RawREMass": np.nan,
+            "OutlierRate50": np.nan
         }
 
-    print("class |  AP  | count | Mass MAPE | Mass MAE | TotalMassMAPE | GT Mass | Pred Mass | Raw Pred Mass | Raw RE")
+    print("class |  AP  | count | Mass MAPE | Mass MAE | TotalMassMAPE | GT Mass | Pred Mass | Raw Pred Mass | Raw RE | OutlierRate")
     for cls_id, val in results.items():
         print(
             f"{cls_id:5s} | {val['AP']:.3f} | {val['count']:5d} |  "
             f"{val['MassMAPE']*100: ^5.2f}%  | {val['MassMAE']: ^8.2f} | {val['TotalMassMAPE']*100: >12.2f}% "
-            f"| {val['GTMass']: ^8.2f} | {val['PosPREDMass']: ^10.2f} | {val['RawPREDMass']: ^10.2f} | {100*val['RawREMass']: ^10.2f}%"
+            f"| {val['GTMass']: ^8.2f} | {val['PosPREDMass']: ^10.2f} | {val['RawPREDMass']: ^10.2f} "
+            f"| {100*val['RawREMass']: ^10.2f}% | {val["OutlierRate50"]*100: >12.2f}"
         )
 
     return results, total_gt_mass_per_cls, per_image_results
