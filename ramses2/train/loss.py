@@ -19,29 +19,31 @@ def compute_image_loss(
     use_geom=True,
     beta=2.0,
 ):
-    """Compute the loss for one image
-    Note that the inputs must not have a batch dimension.
-    Args:
-        inputs: tuple of tensors (see docstring below)
-        weights: list of weights for [cls, seg, density]
-        kernel_size: mask kernel params
-        max_pos: max positive GT mask (to limit memory footprint)
-        compute_seg_loss, compute_cls_loss, compute_density_loss: bools
-        label_smoothing: float
-        seg_loss_func: 'focal', 'dice', or 'both'
-    Returns:
-        cls_loss, seg_loss, density_loss (weighted)
+    """Compute the combined loss for a single image (no batch dimension).
 
-    inputs:
-        - cls_targets: [nloc, n_classes] one_hot encoded class targets (without the background slice). The targets are flattened over the spatial dimension and over all the FPN levels
-        - label_targets: [nloc] tensor of class labels (1-indexed)
-        - density_targets: [nloc] tensor of target densities
-        - gt_masks: [H, W] tensor of ground truth masks (instance IDs)
-        - cls_pred: [nloc, n_classes] tensor of class predictions (after sigmoid!)
-        - cls_factor_pred: [nloc] tensor of class factors
-        - kernel_pred: [nloc, k*k*in_ch] tensor of predicted kernels
-        - mask_head_pred: [in_ch, H, W] tensor of mask head predictions
-        - geom_factor_pred: [1, H, W] or [H, W, 1] tensor of geometric factors
+    Args:
+        inputs: tuple of tensors:
+            - cls_targets: [nloc, n_classes] one-hot class targets (background excluded),
+              flattened over spatial positions and all FPN levels.
+            - label_targets: [nloc] instance class labels (1-indexed).
+            - density_targets: [nloc] target densities.
+            - gt_masks: [H, W] ground-truth instance masks (instance IDs).
+            - cls_pred: [nloc, n_classes] class predictions (post-sigmoid).
+            - cls_factor_pred: [nloc] per-location class factors.
+            - kernel_pred: [nloc, k*k*in_ch] predicted convolution kernels.
+            - mask_head_pred: [in_ch, H, W] mask head feature map.
+            - geom_factor_pred: [1, H, W] or [H, W, 1] geometric factor map.
+        weights: list of [cls, seg, density] loss weights.
+        kernel_size: spatial kernel size for the mask convolution.
+        max_pos: max number of positive positions to use (memory cap).
+        compute_seg_loss / compute_cls_loss / compute_density_loss: enable flags.
+        label_smoothing: label smoothing rate (0 = off).
+        seg_loss_func: 'focal', 'dice', or 'both'.
+        use_geom: if True, multiply mask by geometric factors for density.
+        beta: reserved (mask-quality weighting, currently unused).
+
+    Returns:
+        Tuple (cls_loss, seg_loss, density_loss), each already scaled by its weight.
     """
     (
         cls_targets,
@@ -150,15 +152,24 @@ def compute_image_loss(
 
 
 def focal_loss_label_smoothing(pred, gt, alpha=0.25, gamma=2.0, label_smoothing: float = 0.0, reduction="sum"):
-    """Focal loss variant that applies label smoothing only on spatial positions
-    where the last-dimension argmax equals 1.
+    """Binary focal loss with label smoothing.
 
-    - If `gt` is one-hot (last dim > 1), a position is considered positive when
-      `gt.argmax(dim=-1) == 1`. Label smoothing is applied only
-      on those positions; other positions remain unchanged (0).
-    - If `gt` is binary (no channel dim), smoothing is applied on entries equal to 1.
+    Label smoothing is applied only to positive positions:
+    - one-hot targets (last dim > 1): positive = argmax == 1 (multi-class case);
+    - binary targets: positive = entry == 1.
 
-    The weighting and normalization use the count of positive positions (anchor_obj_count).
+    Normalization uses the count of positive positions (anchor_obj_count).
+
+    Args:
+        pred: predictions (post-sigmoid), shape [nloc, n_classes] or [nloc].
+        gt: one-hot or binary targets, same shape as pred.
+        alpha: positive-class weight (default 0.25).
+        gamma: focusing parameter (default 2.0).
+        label_smoothing: smoothing rate (0 = disabled).
+        reduction: 'sum' (default) or 'mean'.
+
+    Returns:
+        Focal loss (scalar if reduction != 'none').
     """
     orig_gt = gt.clone()
     is_one_hot = orig_gt.dim() > 1 and orig_gt.shape[-1] > 1
@@ -208,33 +219,48 @@ def focal_loss_label_smoothing(pred, gt, alpha=0.25, gamma=2.0, label_smoothing:
 
 
 def focal_loss(pred, gt, alpha=0.25, gamma=2.0, reduction="sum"):
+    """Standard binary focal loss (no label smoothing).
 
+    Args:
+        pred: predictions (post-sigmoid), any shape.
+        gt: binary targets (0/1), same shape as pred.
+        alpha: positive-class weight (default 0.25).
+        gamma: focusing parameter (default 2.0).
+        reduction: 'sum' (default) or 'mean'.
+
+    Returns:
+        Focal loss (scalar if reduction != 'none').
+    """
     pred = pred.reshape(1, -1)
     gt = gt.reshape(1, -1)
     # Clamp to [0, 1] to avoid numerical instability in BCE
     pred = torch.clamp(pred, min=1e-7, max=1.0 - 1e-7)
 
     if not torch.isfinite(pred).all():
-        print("Error NaN")
+        raise RuntimeError(f"focal_loss: non-finite values detected in predictions. min={pred.min().item()}, max={pred.max().item()}")
     anchor_obj_count = (gt != 0).sum().float()
     alpha_factor = torch.ones_like(gt) * alpha
     alpha_factor = torch.where(gt == 1, alpha_factor, 1 - alpha_factor)
     focal_weight = torch.where(gt == 1, 1 - pred, pred)
     focal_weight = alpha_factor * focal_weight**gamma / (anchor_obj_count + 1)
     focal_weight = focal_weight.float().detach()
-    gt = torch.clamp(gt.float(), min=1e-7, max=1-1e-7)
     bce = F.binary_cross_entropy(pred, gt.float(), reduction=reduction, weight=focal_weight)
     return bce
 
 
 class FocalLossMulti(nn.Module):
+    """Multi-class focal loss (softmax) for one-hot targets.
+
+    Computes L = -alpha_y * (1 - p_y)^gamma * log(p_y) per sample,
+    where p_y is the softmax probability of the true class.
+    """
+
     def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
         """
-        Focal Loss for one-hot encoded targets.
         Args:
-            alpha (torch.Tensor): Weight per class [ncls].
-            gamma (float): Focusing parameter.
-            reduction (str): 'mean', 'sum', or 'none'.
+            alpha: [ncls] per-class weights tensor (None = unweighted).
+            gamma: focusing parameter (default 2.0).
+            reduction: 'mean' (default), 'sum', or 'none'.
         """
         super(FocalLossMulti, self).__init__()
         self.alpha = alpha
@@ -272,63 +298,46 @@ class FocalLossMulti(nn.Module):
             return loss.sum()
         return loss
 
-def dice_loss_with_logits(logits, targets, eps=1e-6, label_smoothing=0.0, reduction="mean"):
-    """
-    Binary Dice Loss calcul partir de logits en utilisant logsigmoid
-
-    Args:
-        logits (Tensor): pr�dictions non activ�es, shape (N, *) ou (N, 1, H, W)
-        targets (Tensor): valeurs binaires (0 ou 1), m�me shape que logits
-        eps (float): terme pour �viter la division par z�ro
-        reduction (str): 'mean', 'sum' ou 'none'
-
-    Returns:
-        Tensor: Dice loss
-    """
-    if label_smoothing > 0:
-        targets = torch.where(targets == 1, 1.0 - label_smoothing, label_smoothing)
-
-    probs = torch.exp(F.logsigmoid(logits))  # sigmoid(logits)
-
-    # Dice coefficient
-    intersection = torch.sum(probs * targets, dim=(1, 2, 3) if logits.dim() == 4 else 1)
-    union = torch.sum(probs + targets, dim=(1, 2, 3) if logits.dim() == 4 else 1)
-
-    dice = (2 * intersection + eps) / (union + eps)
-    loss = 1 - dice
-
-    if reduction == "mean":
-        return loss.mean()
-    elif reduction == "sum":
-        return loss.sum()
-    return loss
-
 
 def dice_loss(pred, gt, label_smoothing: float = 0.0):
+    """Binary Dice loss.
+
+    Args:
+        pred: predictions (post-sigmoid), shape [H, W] or [1, H, W].
+        gt: binary masks (0/1), same shape as pred.
+        label_smoothing: target smoothing rate (0 = disabled).
+
+    Returns:
+        Dice loss (scalar).
+    """
     if label_smoothing > 0:
         gt = torch.where(gt == 1, 1.0 - label_smoothing, label_smoothing)
     a = torch.sum(pred * gt)
     b = torch.sum(pred * pred)
     c = torch.sum(gt * gt)
-    dice = (2 * a) / (b + c + 1e-6)  # if (b + c) > 0 else torch.tensor(0.0, device=pred.device)
+    dice = (2 * a) / (b + c + 1e-6)
     return 1.0 - dice
 
 
 def masked_MSE(masked_y_true, y_pred, mask):
+    """Mean squared error over the finite (True) entries of mask."""
     return torch.sum((masked_y_true - y_pred) ** 2) / torch.clamp(mask.float().sum(), min=1.0)
 
 
 def masked_MAPE(masked_y_true, y_pred, mask, eps=1e-7):
+    """Mean absolute percentage error over the finite (True) entries of mask."""
     num = torch.sum(torch.abs(y_pred - masked_y_true) / torch.clamp(torch.abs(masked_y_true), min=eps))
     denom = torch.clamp(mask.float().sum(), min=1.0)
     return num / denom
 
 
 def masked_MAE(masked_y_true, y_pred, mask):
+    """Mean absolute error over the finite (True) entries of mask."""
     return torch.sum(torch.abs(y_pred - masked_y_true)) / torch.clamp(mask.float().sum(), min=1.0)
 
 
 def MSEIgnoringNaN(y_true, y_pred):
+    """MSE that ignores NaN entries in y_true."""
     mask = torch.isfinite(y_true)
     masked_y_true = torch.where(mask, y_true, y_pred)
     loss = masked_MSE(masked_y_true, y_pred, mask)
@@ -336,6 +345,7 @@ def MSEIgnoringNaN(y_true, y_pred):
 
 
 def MAPEIgnoringNaN(y_true, y_pred):
+    """MAPE that ignores NaN entries in y_true."""
     mask = torch.isfinite(y_true)
     masked_y_true = torch.where(mask, y_true, y_pred)
     loss = masked_MAPE(masked_y_true, y_pred, mask)
@@ -343,6 +353,7 @@ def MAPEIgnoringNaN(y_true, y_pred):
 
 
 def MAEIgnoringNaN(y_true, y_pred):
+    """MAE that ignores NaN entries in y_true."""
     mask = torch.isfinite(y_true)
     masked_y_true = torch.where(mask, y_true, y_pred)
     loss = masked_MAE(masked_y_true, y_pred, mask)

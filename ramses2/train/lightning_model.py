@@ -41,8 +41,7 @@ class TrainConfig:
         # data = {k:v for k, v in self.__dict__.items()}
 
         p = Path(filename).parent.absolute()
-        if not os.path.isdir(p):
-            os.mkdir(p)
+        os.makedirs(p, exist_ok=True)
 
         with open(filename, "w") as f:
             json.dump(self.__dict__, f)
@@ -50,11 +49,11 @@ class TrainConfig:
 
 default_scheduler_config = [
     {
-        "name": "ReduceLROnPlateau",
+        "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau,
         "mode": "min",
         "patience": 4,
         "factor": 0.5,
-        "monitor": "train_loss",
+        "monitor": "train_total_loss",
         "interval": "epoch",
         "frequency": 1,
     },

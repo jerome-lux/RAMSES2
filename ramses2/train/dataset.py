@@ -212,7 +212,7 @@ class DatasetManager:
             tuple: (list of selected basenames, dict of per-class instance counts)
         """
 
-        # Bug: classes that are not counted are not in the instance counter
+        # Bug: classes that are not counted are still in the instance counter but do not drive the balancing loop
 
         basenames = list(basenames)
         cls_inst_counter = {c: 0 for c in self.classes}
@@ -261,7 +261,7 @@ class DatasetManager:
                             for c, n in cls_inst_counter.items():
                                 img_left_per_class[c] += 1
 
-            # s'il reste des images on vérifie si on doit encore ajouter des objets pour atteindre l'objectif
+            # If images remain, check whether we still need to add instances to reach the target
             for c, n in cls_inst_counter.items():
                 if c not in not_counting and n < nmax.get(c, 0) and img_left_per_class[c] > 0:
                     add_instances = True
@@ -386,7 +386,7 @@ class DatasetManager:
 
         max_inst_per_cls = {c: n for c in self.classes}
 
-        print(f"Creating {subset} set with an objective of {n} training intances {constraint} {text}")
+        print(f"Creating {subset} set with an objective of {n} training instances {constraint} {text}")
         print(f"Using {len(temp_basenames)} images")
 
         basenames, class_counts = self._populate_set(
@@ -497,12 +497,12 @@ class DatasetManager:
         inst_per_cls = filtered_annotations["class"].value_counts().to_dict()
 
         # We start by generating the validation set.
-        # However, in the case where the number of instance reamining in the train set is too small
+        # However, in the case where the number of instance remaining in the train set is too small
         # we limit the number of validation instance to 20% of the total number of instances
         max_inst_per_cls = {c: int(min(nval, 0.2 * v)) for c, v in inst_per_cls.items()}
 
         # Note reuse=0 in valid set
-        print(f"Creating test set with an objective of {max_inst_per_cls} valid intances in {text}")
+        print(f"Creating test set with an objective of {max_inst_per_cls} valid instances in {text}")
         print(f"Using {len(filtered_basenames)} images")
 
         valid_basenames, valid_class_counts = self._populate_set(
@@ -519,7 +519,7 @@ class DatasetManager:
         max_inst_per_cls = {c: ntrain for c in self.classes}
         temp_train_basenames = set(filtered_basenames) - set(valid_basenames)
 
-        print(f"Creating training set with an objective of {ntrain} training intances in {text}")
+        print(f"Creating training set with an objective of {ntrain} training instances in {text}")
         print(f"Using {len(temp_train_basenames)} images")
         train_basenames, train_class_counts = self._populate_set(
             temp_train_basenames,
@@ -834,11 +834,11 @@ def collate_fn_cutmix(
     max_resample_attempts=5,
 ):
     """
-    Collate function CutMix multi-patch robuste avec:
-      - Remapping d'IDs sans collision (vérifié via labels[i] + mapping persistant)
-      - Réutilisation du même dst_id si (j, src_id) recollé plusieurs fois
-      - Pas de double ajout de métadonnées pour un dst_id déjà présent
-      - Gestion batch=1, patchs vides, nettoyage final
+    Collate function with CutMix multi-patch augmentation. Features:
+      - ID remapping without collisions (verified via persistent per-target mapping)
+      - Reuse of the same dst_id if (j, src_id) is pasted multiple times
+      - No duplicate metadata for a dst_id already present
+      - Handles batch=1, empty patches, and final cleanup
     """
     B = len(batch)
     if B == 0:
@@ -852,20 +852,20 @@ def collate_fn_cutmix(
             "label": torch.nested.nested_tensor([]),
         }
 
-    # Empilement tenseurs
-    images = torch.stack([item["image"] for item in batch])  # (B, H, W, 3)
+    # Stack tensors
+    images = torch.stack([item["image"] for item in batch])  # (B, C, H, W)
     masks = torch.stack([item["masks"] for item in batch])  # (B, Hm, Wm)
     filenames = [item["filename"] for item in batch]
 
-    # Copie / normalisation métadonnées en listes de scalaires Python
+    # Copy / normalize metadata into Python scalar lists
     def to_py_list(x):
-        # x est déjà une liste dans ton dataset; on force les scalaires
+        # x is already a list from the dataset; force scalars to int
         out = []
         for v in x:
             if torch.is_tensor(v):
                 out.append(int(v.item()))
             else:
-                # int() marche pour numpy scalars et ints Python
+                # int() works for numpy scalars and Python ints
                 out.append(int(v))
         return out
 
@@ -875,45 +875,45 @@ def collate_fn_cutmix(
     labels = [to_py_list(item["label"]) for item in batch]
 
     if random.random() < p:
-        _, H, W, _ = images.shape
+        B, C, H, W = images.shape
         Hm, Wm = masks.shape[1:]
 
-        # Pour chaque image cible i : ensemble des labels déjà utilisés et max courant
+        # For each target image i: set of already-used labels and current max
         used_labels = [set(lbls) for lbls in labels]
         max_label_val = [max(lbls) if len(lbls) > 0 else 0 for lbls in labels]
 
-        # Attribution des partenaires
+        # Partner assignment
         indices = list(range(B))
         random.shuffle(indices)
 
         for i in range(B):
-            # Partenaire j
+            # Partner j
             if B == 1:
                 if not allow_self_mix:
-                    continue  # pas de CutMix possible
+                    continue  # no CutMix possible
                 j = 0
             else:
                 if i == indices[i] and not allow_self_mix:
-                    # choisir un autre que i
+                    # pick someone other than i
                     candidates = [k for k in range(B) if k != i]
                     j = random.choice(candidates)
                 else:
                     j = indices[i]
 
-            # Mapping persistant pour cette cible i (clé = (j, src_id) → dst_id)
-            # Il est spécifique à l'image i pour toute la durée de ses collages
+            # Persistent mapping for target i (key = (j, src_id) -> dst_id)
+            # Specific to image i for the duration of its pastes
             reuse_map = {}
 
             num_patches = random.randint(1, max_patches)
 
             for _ in range(num_patches):
-                # ==== rééchantillonnage d'un patch non vide (au moins une instance) ====
+                # ==== resample a non-empty patch (at least one instance) ====
                 patch_valid = False
                 attempts = 0
                 while not patch_valid and attempts < max_resample_attempts:
                     attempts += 1
 
-                    # Taille patch (min clampé à mask_stride pour garantir >= 1 cellule masque)
+                    # Patch size (min clamped to mask_stride to guarantee >= 1 mask cell)
                     pw = max(int(W * random.uniform(min_patch_ratio, max_patch_ratio)), mask_stride)
                     ph = max(int(H * random.uniform(min_patch_ratio, max_patch_ratio)), mask_stride)
                     pw = min(pw, W)
@@ -924,25 +924,25 @@ def collate_fn_cutmix(
                     y1 = random.randint(0, H - ph)
                     x2, y2 = x1 + pw, y1 + ph
 
-                    # Coordonnées masque
+                    # Mask coordinates
                     mx1, my1 = x1 // mask_stride, y1 // mask_stride
                     mx2 = min(max(mx1 + 1, x2 // mask_stride), Wm)
                     my2 = min(max(my1 + 1, y2 // mask_stride), Hm)
                     if mx2 <= mx1 or my2 <= my1:
-                        continue  # trop petit côté masque
+                        continue  # too small in mask space
 
-                    # Patch source
-                    patch_img = images[j, y1:y2, x1:x2, :].clone()
+                    # Source patch
+                    patch_img = images[j, :, y1:y2, x1:x2].clone()
                     patch_mask = masks[j, my1:my2, mx1:mx2].clone()
 
-                    # Vérifie présence instance
+                    # Check for instance presence
                     if torch.unique(patch_mask).numel() > 1:  # > {0}
                         patch_valid = True
 
                 if not patch_valid:
-                    continue  # on passe ce patch si rien trouvé
+                    continue  # skip this patch if nothing found
 
-                # ==== remapping des IDs avec réutilisation pour (j, src_id) ====
+                # ==== ID remapping with reuse for (j, src_id) ====
                 unique_src = torch.unique(patch_mask).tolist()
 
                 for src_id in unique_src:
@@ -954,7 +954,7 @@ def collate_fn_cutmix(
                     if key in reuse_map:
                         dst_id = reuse_map[key]
                     else:
-                        # Propose src_id, sinon alloue un nouvel ID si collision avec labels DEJA PRÉSENTS
+                        # Propose src_id, or allocate a new ID if collision with existing labels
                         if src_id in used_labels[i]:
                             max_label_val[i] += 1
                             dst_id = max_label_val[i]
@@ -962,10 +962,10 @@ def collate_fn_cutmix(
                             dst_id = src_id
                         reuse_map[key] = dst_id
 
-                        # Ajoute la métadonnée UNE SEULE FOIS par dst_id (si pas déjà présent)
+                        # Add metadata ONLY ONCE per dst_id (if not already present)
                         if dst_id not in used_labels[i]:
-                            # Cherche l'entrée correspondante dans la source j
-                            # (labels[j] est 1:1 avec masses[j], ress[j], category_ids[j])
+                            # Find the corresponding entry in source j
+                            # (labels[j] is 1:1 with masses[j], ress[j], category_ids[j])
                             for k, lbl_j in enumerate(labels[j]):
                                 if int(lbl_j) == src_id:
                                     labels[i].append(dst_id)
@@ -975,15 +975,15 @@ def collate_fn_cutmix(
                                     used_labels[i].add(dst_id)
                                     break
 
-                    # Applique le mapping dans le patch (peut être identité)
+                    # Apply mapping in the patch (may be identity)
                     if dst_id != src_id:
                         patch_mask[patch_mask == src_id] = dst_id
 
-                # Collage image + masque
-                images[i, y1:y2, x1:x2, :] = patch_img
+                # Paste image + mask
+                images[i, :, y1:y2, x1:x2] = patch_img
                 masks[i, my1:my2, mx1:mx2] = patch_mask
 
-            # ==== Nettoyage final pour i : ne garder que les objets visibles ====
+            # ==== Final cleanup for i: keep only visible objects ====
             visible = set(int(x) for x in torch.unique(masks[i]).tolist() if int(x) != 0)
             keep_idx = [k for k, lbl in enumerate(labels[i]) if int(lbl) in visible]
 
@@ -992,7 +992,7 @@ def collate_fn_cutmix(
             masses[i] = [masses[i][k] for k in keep_idx]
             ress[i] = [ress[i][k] for k in keep_idx]
 
-    # Sortie
+    # Output
     return {
         "filename": filenames,
         "image": images,

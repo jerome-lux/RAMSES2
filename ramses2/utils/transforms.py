@@ -7,7 +7,11 @@ from .utils import make_tuple
 
 class TorchAugmentations:
     """
-    Augmentations for torch pipelines (brightness, hue, saturation, noise, rotation).
+    Data augmentation pipeline for torch-based training samples.
+
+    Applies probabilistic brightness, hue, saturation, Gaussian noise, and rotation
+    augmentations. Masks are rotated with nearest-neighbor interpolation and
+    re-labeled to remove instances lost at the borders.
     """
 
     def __init__(self, probability: Union[Sequence, float] = 0.5,
@@ -25,7 +29,17 @@ class TorchAugmentations:
         self.hue_factor = hue_factor
         self.brightness_factor = brightness_factor
 
-    def __call__(self, sample):
+    def __call__(self, sample: dict) -> dict:
+        """
+        Apply the augmentation pipeline to a training sample.
+
+        Args:
+            sample: Dict with keys "image", "masks", "category_id", "label", "mass", "res",
+                and optionally "filename".
+
+        Returns:
+            Dict with the same keys as input, containing augmented values.
+        """
         img = sample["image"]
         masks = sample["masks"]
         cat_ids = sample["category_id"]
@@ -55,7 +69,7 @@ class TorchAugmentations:
         # 4. Gaussian noise
         if self.rng.uniform() < self.probability[3]:
             noise = torch.randn_like(img) * 0.05
-            img = torch.clamp(img, 0.0, 1.0)
+            img = torch.clamp(img + noise, 0.0, 1.0)
 
         img = torch.clamp(img, 0.0, 1.0)
 
@@ -64,7 +78,7 @@ class TorchAugmentations:
             angle = float(self.rng.uniform(-self.rotation_factor * 180, self.rotation_factor * 180))
             # Image rotation
             new_img = TF.rotate(img, angle, interpolation=TF.InterpolationMode.BILINEAR, fill=0.0)
-            new_img = torch.clamp(img, 0.0, 1.0)
+            new_img = torch.clamp(new_img, 0.0, 1.0)
             # Mask rotation
             masks_rot = (
                 TF.rotate(masks.unsqueeze(0).float(), angle, interpolation=TF.InterpolationMode.NEAREST, fill=0)

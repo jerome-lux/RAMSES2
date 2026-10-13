@@ -1,18 +1,19 @@
 import torch
 
 
-def Recall(y_true, y_pred, threshold=0, eps=1e-8):
+def Recall(y_true: torch.Tensor, y_pred: torch.Tensor, threshold: float = 0, eps: float = 1e-8) -> float:
     """
     Compute recall for one-hot tensors [N, ncls] WITHOUT background column.
     Dynamically adds a background (class 0) column on the left.
     Args:
         y_true (torch.Tensor): one-hot, shape [N, ncls] (no background)
         y_pred (torch.Tensor): probabilities, shape [N, ncls] (no background)
+        threshold (float): predictions below this value are zeroed out before classification (default 0 = no thresholding)
         eps (float): small value to avoid division by zero
     Returns:
         float: recall over all classes
     """
-    N, ncls = y_true.shape
+    ncls = y_true.shape[1]
     # Clamp y_pred to [0, 1] to avoid negative or > 1 values
     y_pred = y_pred.clamp(0, 1)
     if threshold > 0:
@@ -28,18 +29,19 @@ def Recall(y_true, y_pred, threshold=0, eps=1e-8):
     return recall.item()
 
 
-def Precision(y_true, y_pred, threshold=0, eps=1e-8):
+def Precision(y_true: torch.Tensor, y_pred: torch.Tensor, threshold: float = 0, eps: float = 1e-8) -> float:
     """
     Compute precision for one-hot tensors [N, ncls] WITHOUT background column.
     Dynamically adds a background (class 0) column on the left.
     Args:
         y_true (torch.Tensor): one-hot, shape [N, ncls] (no background)
-        y_pred (torch.Tensor): logits or probabilities, shape [N, ncls] (no background)
+        y_pred (torch.Tensor): probabilities, shape [N, ncls] (no background)
+        threshold (float): predictions below this value are zeroed out before classification (default 0 = no thresholding)
         eps (float): small value to avoid division by zero
     Returns:
         float: precision over all classes
     """
-    N, ncls = y_true.shape
+    ncls = y_true.shape[1]
     # Clamp y_pred to [0, 1] to avoid negative or > 1 values
     y_pred = y_pred.clamp(0, 1)
     if threshold > 0:

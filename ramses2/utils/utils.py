@@ -6,33 +6,33 @@ import torch.nn as nn
 from ..core import norm
 
 
-def get_class(name: str, extra_modules=[norm]):
+def get_class(name: str, extra_modules=None):
     """
-    Recherche une classe par nom dans torch.nn puis dans une liste de modules supplémentaires.
+    Look up a class by name in torch.nn, then in a list of additional modules.
 
     Args:
-        name (str): nom de la classe (ex: "ReLU" ou "GroupNormCustom")
-        extra_modules (list[module]): modules dans lesquels chercher si non trouvé dans torch.nn
+        name: Class name (e.g., "ReLU" or "GroupNormCustom").
+        extra_modules: Optional list of modules to search if not found in torch.nn.
 
     Returns:
-        type: la classe Python correspondante
+        type: The matching Python class.
 
     Raises:
-        ValueError: si la classe n'est trouvée dans aucun module
+        ValueError: If the class is not found in any module.
     """
     if extra_modules is None:
         extra_modules = []
 
-    # Essayer d'abord dans torch.nn
+    # Try torch.nn first
     if hasattr(nn, name):
         return getattr(nn, name)
 
-    # Sinon chercher dans les modules fournis
+    # Then search the provided modules
     for module in extra_modules:
         if hasattr(module, name):
             return getattr(module, name)
 
-    raise ValueError(f"Classe '{name}' non trouvée dans torch.nn ni dans les modules fournis {extra_modules}.")
+    raise ValueError(f"Class '{name}' not found in torch.nn or in the provided modules {extra_modules}.")
 
 
 def make_tuple(value, n, fill_value=None):
@@ -52,16 +52,19 @@ def make_tuple(value, n, fill_value=None):
 
 def point_nms(x, kernel_size=2):
     """
+    Apply local non-maximum suppression to a dense score map.
+
     Args:
-        x (Tensor): [N, H, W] ou [C, H, W], la carte de score dense
-        kernel_size (int): taille de la fenêtre locale (souvent 2)
+        x: Dense score map of shape (N, C, H, W) or (1, 1, H, W).
+        kernel_size: Size of the local window for max-pooling (default: 2).
+
     Returns:
-        Tensor: carte de score avec suppression des non-maxima locaux
+        Tensor: Score map with non-local-maximum points suppressed to zero.
     """
-    # Appliquer un max pooling local pour détecter les maxima
+    # Local max-pooling to detect maxima
     max_score = F.max_pool2d(x, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
 
-    # Garder uniquement les points qui sont des maxima
+    # Keep only local maxima
     keep = (x == max_score).float()
 
     return x * keep
@@ -69,25 +72,23 @@ def point_nms(x, kernel_size=2):
 
 def get_same_padding(kernel_size: Union[int, Tuple[int, int]], stride: Union[int, Tuple[int, int]]):
     """
-    Calcule le padding (gauche, droite, haut, bas) nécessaire pour avoir une sortie
-    de taille in_dim // stride avec un kernel donné.
+    Compute the (left, right, top, bottom) padding for a "same" convolution,
+    i.e., output spatial size equals ceil(input_size / stride).
 
     Args:
-        kernel_size: taille du noyau (int ou tuple de 2)
-        stride: facteur de stride (int ou tuple de 2)
+        kernel_size: Convolution kernel size (int or (h, w) tuple).
+        stride: Convolution stride (int or (h, w) tuple).
 
     Returns:
-        Tuple[int, int, int, int]: (padding_left, padding_right, padding_top, padding_bottom)
+        Tuple[int, int, int, int]: (padding_left, padding_right, padding_top, padding_bottom).
     """
     if isinstance(kernel_size, int):
         kernel_size = (kernel_size, kernel_size)
-    if isinstance(stride, int):
-        stride = (stride, stride)
 
-    pad_h = max(stride[0] - 1 + kernel_size[0] - stride[0], 0)
-    pad_w = max(stride[1] - 1 + kernel_size[1] - stride[1], 0)
+    # Total padding per dimension = kernel_size - 1, split as evenly as possible.
+    pad_h = kernel_size[0] - 1
+    pad_w = kernel_size[1] - 1
 
-    # Répartir le padding à gauche/droite et haut/bas
     pad_top = pad_h // 2
     pad_bottom = pad_h - pad_top
     pad_left = pad_w // 2
@@ -96,7 +97,17 @@ def get_same_padding(kernel_size: Union[int, Tuple[int, int]], stride: Union[int
     return (pad_left, pad_right, pad_top, pad_bottom)
 
 
-def pad_with_coords(data):
+def pad_with_coords(data: torch.Tensor) -> torch.Tensor:
+    """
+    Append normalized coordinate channels (x, y in [-1, 1]) to a feature map.
+
+    Args:
+        data: Input tensor of shape (B, C, H, W).
+
+    Returns:
+        Tensor of shape (B, C+2, H, W) with the last two channels being
+        the x and y spatial coordinates normalized to [-1, 1].
+    """
     # data: (batch_size, channels, height, width)
     batch_size, channels, height, width = data.shape
     device = data.device
@@ -121,10 +132,10 @@ def decode_predictions(seg_preds, scores, threshold=0.5, by_mask_scores=True):
     Returns labeled array.
 
     Args:
-        seg_preds: (N, H, W) torch.Tensor, one predicted mask per slice (sigmoid activation)
-        scores: (N,) torch.Tensor, score of each predicted instance
-        threshold: float, threshold to compute binary masks
-        by_scores: bool, if True, rank the masks by score, else, rank each pixel by their seg_pred value.
+        seg_preds: (N, H, W) torch.Tensor, one predicted mask per instance (sigmoid activation).
+        scores: (N,) torch.Tensor, score of each predicted instance.
+        threshold: float, threshold to compute binary masks.
+        by_mask_scores: bool, if True, rank masks by score; otherwise rank each pixel by its seg_pred value.
 
     Returns:
         labeled_masks: (H, W) torch.LongTensor, labeled mask image
@@ -167,7 +178,7 @@ def compute_cls_targets(
         classes: Tensor [N]
         masks: Tensor [H, W] with labeled object (0: bg)
         densities: Tensor [N]
-        shape (tuple): Shape of the input image (width, height).
+        shape: Shape of the input image (height, width).
         strides (list, optional): List of stride values for each feature level. Default is [4, 8, 16, 32, 64].
         grid_sizes (list, optional): List of grid sizes for each feature level. Default is [64, 36, 24, 16, 12].
         scale_ranges (list, optional): List of [min, max] object scale ranges for each level. Default is [[1, 96], [48, 192], [96, 384], [192, 768], [384, 2048]].
@@ -262,7 +273,7 @@ def compute_cls_targets(
                 )
                 inside_indices = torch.where(inside_mask)[0]
 
-                # Ajouter le centre du box si rien à l’intérieur
+                # Add the box center if no grid point falls inside
                 cx_pix = min(int(round((lvl_nx - 1) * cx.item())), lvl_imshape[0] - 1)
                 cy_pix = min(int(round((lvl_ny - 1) * cy.item())), lvl_imshape[1] - 1)
                 center_indices = torch.where(
@@ -293,11 +304,18 @@ def compute_cls_targets(
     return class_targets, label_targets, density_targets
 
 
-def boxes_from_masks(masks):
+def boxes_from_masks(masks: torch.Tensor):
     """
+    Compute bounding boxes from a labeled mask image.
+
+    Args:
+        masks: Labeled mask tensor of shape (H, W), where 0 is background
+            and values >= 1 are instance labels.
+
     Returns:
-    boxes (center x, center y, H, W) of labelled objects
-    an array with the corresponding labels in the image.
+        Tuple[torch.Tensor, torch.Tensor]:
+            - boxes: (N, 4) tensor of [cx, cy, dx, dy] normalized to [0, 1].
+            - unique_labels: (N,) tensor of the non-zero labels present in the mask.
     """
     device = masks.device
     unique_labels = torch.unique(masks)
@@ -326,31 +344,22 @@ def boxes_from_masks(masks):
     return boxes, unique_labels
 
 
-# def compute_mask_targets(gt_masks, gt_labels):
-#     """
-#     gt_masks: torch.Tensor of shape (H, W, num_objects), one-hot encoded masks (last dim is object index)
-#     gt_labels: torch.Tensor of shape (N,), flattened vector of labels (corresponding to mask indices)
-#     Returns:
-#         mask_targets: torch.Tensor of shape (H, W, npos), where npos = number of positive labels (labels > 0)
-#                       Each slice corresponds to a mask target, arranged in the same order as the class/labels targets.
-#     """
-#     pos_indices = (gt_labels > 0).nonzero(as_tuple=True)[0]
-#     pos_labels = gt_labels[pos_indices]
-
-#     # Gather the corresponding mask slices for each positive label
-#     mask_targets = []
-#     for label in pos_labels:
-#         mask_targets.append(gt_masks[..., label.item()].unsqueeze(-1))
-#     if mask_targets:
-#         mask_targets = torch.cat(mask_targets, dim=-1)
-#     else:
-#         # No positive labels, return empty tensor with correct shape
-#         H, W, _ = gt_masks.shape
-#         mask_targets = torch.empty((H, W, 0), dtype=gt_masks.dtype, device=gt_masks.device)
-#     return mask_targets
 
 
-def compute_locations(stride, shape, shift="r"):
+
+def compute_locations(stride: int, shape: Tuple[int, int], shift: str = "r") -> torch.Tensor:
+    """
+    Compute a grid of anchor point locations for a given feature map size and stride.
+
+    Args:
+        stride: Spatial stride (sampling step) between anchor points.
+        shape: Feature map spatial dimensions (height, width).
+        shift: Grid alignment — "r"/"right" centers points at stride//2,
+            "l"/"left" shifts them to stride//2 - 1.
+
+    Returns:
+        Tensor of shape (num_points, 2) with (x, y) coordinates for each location.
+    """
     if shift.lower() in ["r", "right"]:
         begin = stride // 2
     else:
@@ -364,8 +373,18 @@ def compute_locations(stride, shape, shift="r"):
     return locations
 
 
-def normalize_bboxes(bboxes, nx, ny):
+def normalize_bboxes(bboxes: np.ndarray, nx: int, ny: int) -> np.ndarray:
+    """
+    Normalize bounding box coordinates from pixel space to [0, 1].
 
+    Args:
+        bboxes: Array of shape (..., 4) with [x_min, y_min, x_max, y_max] in pixels.
+        nx: Image width in pixels.
+        ny: Image height in pixels.
+
+    Returns:
+        np.ndarray of shape (..., 4) with normalized coordinates in [0, 1].
+    """
     normalized_bboxes = bboxes.astype(np.float32)
     normalized_bboxes[..., 0] /= nx - 1
     normalized_bboxes[..., 1] /= ny - 1
@@ -374,8 +393,18 @@ def normalize_bboxes(bboxes, nx, ny):
     return normalized_bboxes
 
 
-def denormalize_bboxes(norm_bboxes, nx, ny):
+def denormalize_bboxes(norm_bboxes: np.ndarray, nx: int, ny: int) -> np.ndarray:
+    """
+    Convert normalized bounding box coordinates back to pixel space.
 
+    Args:
+        norm_bboxes: Array of shape (..., 4) with normalized [x_min, y_min, x_max, y_max] in [0, 1].
+        nx: Image width in pixels.
+        ny: Image height in pixels.
+
+    Returns:
+        np.ndarray of shape (..., 4) with integer pixel coordinates, clamped to [0, nx/ny].
+    """
     bboxes = np.zeros(norm_bboxes.shape).astype(np.int32)
     bboxes[..., 0] = np.maximum(np.around(norm_bboxes[..., 0] * (nx - 1)), 0)
     bboxes[..., 1] = np.maximum(np.around(norm_bboxes[..., 1] * (ny - 1)), 0)
@@ -385,8 +414,8 @@ def denormalize_bboxes(norm_bboxes, nx, ny):
 
 
 def crop_to_aspect_ratio(target_shape, image):
-    """Crop an image so that its aspect ratio is the same as target_shape
-    Note: it does not resize the image to target_shape !"""
+    """Crop an image so that its aspect ratio matches target_shape.
+    Note: this does NOT resize the image to target_shape."""
 
     ratio = target_shape[0] / target_shape[1]
 
@@ -402,8 +431,8 @@ def crop_to_aspect_ratio(target_shape, image):
     rx = np.abs(cropx) % 2
     ry = np.abs(cropy) % 2
 
-    if image.ndim > 4:
-        print("pad_to_aspect_ratio only support gray or RGB 2D images")
+    if image.ndim not in (2, 3, 4):
+        raise ValueError(f"crop_to_aspect_ratio only supports 2D, 3D, or 4D images (got ndim={image.ndim})")
 
     if cropx > 0:
         if image.ndim == 4:
@@ -463,115 +492,63 @@ def pad_to_aspect_ratio(target_shape, image):
         else:
             print("pad_to_aspect_ratio only support gray or RGB 2D images")
 
-    return image, ((px, px + rx), (py), py + ry)
+    return image, ((px, px + rx), (py, py + ry))
 
 
-def relabel_and_filter_old(masks: torch.Tensor, original_labels: torch.Tensor, *tensors_to_filter):
-    """
-    Relabels the labeled mask image with consecutive integers starting from 1,
-    and filters associated tensors based on the mapping from original labels.
 
-    Args:
-        masks (torch.Tensor): Labeled image after rotation, with integer labels (0 for background).
-        original_labels (torch.Tensor): 1D tensor of original labels.
-        *tensors_to_filter: Additional tensors to be filtered according to the new label mapping.
-
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
-            - relabeled_image: Image with relabeled components (background remains 0).
-            - mapping_indices: Indices mapping new labels to original labels.
-            - filtered_tensors: List of filtered tensors corresponding to the new labels.
-    """
-
-    # Extraire les labels uniques, en excluant 0 (le fond)
-    device = masks.device
-    unique_labels = torch.unique(masks)
-    unique_labels = unique_labels[unique_labels != 0]
-    unique_labels = unique_labels.sort().values
-
-    expected_consecutive_labels = torch.arange(1, unique_labels.numel() + 1, device=device)
-
-    if (
-        torch.all(unique_labels == expected_consecutive_labels)
-        and unique_labels.numel() == original_labels.numel()
-        and torch.all(unique_labels == original_labels.sort().values)
-    ):
-        return masks, original_labels, list(tensors_to_filter)
-
-    # Créer le mapping: ancien label -> nouveau label (entiers consécutifs à partir de 1)
-    new_labels = torch.arange(1, len(unique_labels) + 1)
-    label_to_new = dict(zip(unique_labels.tolist(), new_labels.tolist()))
-
-    # Relabellisation de l'image (le fond reste 0)
-    relabeled_image = masks.clone()
-    for old_label, new_label in label_to_new.items():
-        relabeled_image[masks == old_label] = new_label
-
-    # Créer le mapping des indices dans original_labels
-    mapping_indices = []
-    for label in unique_labels:
-        matches = (original_labels == label).nonzero(as_tuple=True)[0]
-        if len(matches) == 0:
-            # print(unique_labels)
-            # print(original_labels)
-            # print(ValueError(f"Label {label.item()} not found in original_labels"))
-            raise ValueError(f"Label {label.item()} not found in original_labels")
-        if len(matches) > 1:
-            raise ValueError(
-                f"Multiple matches found for label {label.item()} in original_labels: {matches.tolist()}"
-                f", unique labels: {unique_labels.tolist()}, original labels: {original_labels.tolist()}"
-                f"{tensors_to_filter}"
-            )
-        mapping_indices.append(matches.item())  # Un seul match attendu
-
-    mapping_indices = torch.tensor(mapping_indices, dtype=torch.long)
-
-    # Filtrage des tenseurs d'entrée
-    filtered_tensors = [t[mapping_indices].to(device) for t in tensors_to_filter]
-
-    return relabeled_image.to(device), new_labels.to(device), filtered_tensors
 
 
 def relabel_and_filter(masks: torch.Tensor, original_labels: torch.Tensor, *tensors_to_filter):
     """
-    Version optimisée utilisant une Look-Up Table (LUT) pour une relabellisation instantanée.
+    Relabel a mask image with consecutive integers (1..N) and filter associated tensors.
+
+    Uses a look-up table (LUT) for O(1) per-pixel relabeling.
+
+    Args:
+        masks: Labeled mask tensor (0 = background, >=1 = instance labels).
+        original_labels: 1D tensor of original labels corresponding to each instance.
+        *tensors_to_filter: Additional 1D tensors (e.g., scores, masses) to filter
+            according to the new label ordering.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+            - relabeled_image: Masks with consecutive labels 1..N (background remains 0).
+            - new_labels: (N,) tensor of the new consecutive labels.
+            - filtered_tensors: List of filtered input tensors reordered to match new labels.
+
+    Raises:
+        ValueError: If a label present in masks is not found in original_labels.
     """
     device = masks.device
 
-    # 1. Extraire les labels uniques présents dans le masque
+    # 1. Extract unique non-zero labels present in the mask
     unique_labels = torch.unique(masks)
-    unique_labels = unique_labels[unique_labels != 0] # On ignore le fond
+    unique_labels = unique_labels[unique_labels != 0]
 
     if unique_labels.numel() == 0:
         return masks, torch.tensor([], device=device), [t[:0] for t in tensors_to_filter]
 
-    # 2. Créer le mapping des indices pour filtrer les tenseurs (scores, masses, etc.)
-    # On cherche où se trouvent les unique_labels dans original_labels
+    # 2. Find the index mapping to filter associated tensors (scores, masses, etc.)
     sorted_orig, sorted_idx = torch.sort(original_labels)
-    # On trouve la position des labels présents dans le tenseur trié
     pos = torch.searchsorted(sorted_orig, unique_labels)
 
-    # Vérification : tous les labels présents dans l'image doivent exister dans original_labels
-    # Clamp pos to valid indices before accessing sorted_orig
+    # Validate: all labels in the image must exist in original_labels
     pos_clipped = torch.clamp(pos, max=sorted_orig.numel() - 1)
     mask_valid = (pos < sorted_orig.numel()) & (sorted_orig[pos_clipped] == unique_labels)
     if not torch.all(mask_valid):
         missing_label = unique_labels[~mask_valid][0].item()
-        raise ValueError(f"Label {missing_label} présent dans le masque mais absent de original_labels")
+        raise ValueError(f"Label {missing_label} present in masks but missing from original_labels")
 
     mapping_indices = sorted_idx[pos]
 
-    # 3. Relabellisation
+    # 3. Relabel via LUT
     max_label = int(unique_labels.max().item())
     lut = torch.zeros(max_label + 1, dtype=masks.dtype, device=device)
-
     new_labels = torch.arange(1, len(unique_labels) + 1, device=device, dtype=masks.dtype)
     lut[unique_labels.long()] = new_labels
-
-    # On applique la LUT d'un coup sur toute l'image
     relabeled_image = lut[masks.long()]
 
-    # 4. Filtrage des tenseurs additionnels
+    # 4. Filter additional tensors
     filtered_tensors = [t[mapping_indices] for t in tensors_to_filter]
 
     return relabeled_image, new_labels, filtered_tensors

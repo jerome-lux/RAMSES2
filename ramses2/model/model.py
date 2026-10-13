@@ -167,7 +167,7 @@ class RAMSESModel(nn.Module):
             B, C_cls, H, W = class_probs.shape
             _, C_fac, _, _ = class_factor.shape
             _, C_ker, _, _ = kernel_features.shape
-            # flatten the predcitions and add to list
+            # flatten the predictions and add to list
             flat_pred_cls.append(class_probs.reshape(B, C_cls, -1))
             flat_cls_factor.append(class_factor.reshape(B, C_fac, -1))
             flat_pred_kernel.append(kernel_features.reshape(B, C_ker, -1))
@@ -559,10 +559,9 @@ def matrix_nms(
     # calculate iou between different masks
     binary_masks_flat = binary_masks.view(N, -1).float()  # [N, H*W]
     intersection = torch.matmul(binary_masks_flat, binary_masks_flat.T)  # [N, N]
-    mask_sum_tile = mask_sum.view(1, -1) + mask_sum.view(
-        1, -1
-    )  # instead of mask_sum.view(1, -1).expand(N,N), it works because of broadcasting!
-    union = mask_sum_tile - intersection  # + mask_sum_tile.t() - intersection
+    # Union = area_i + area_j - intersection (pairwise, via broadcasting)
+    mask_sum_tile = mask_sum.view(-1, 1) + mask_sum.view(1, -1)  # [N, N]
+    union = mask_sum_tile - intersection
     iou = intersection / (union + 1e-6)
     iou = torch.triu(iou, diagonal=1)  # upper triangular, zero diagonal
 
@@ -633,7 +632,7 @@ def mask_nms(
     if N == 0:
         return seg_preds, scores, cls_labels, cls_factors
 
-    # Tri par score décroissant
+    # Sort by descending score
     indices = torch.argsort(scores, descending=True)
     scores = scores[indices]
     seg_preds = seg_preds[indices]
@@ -654,12 +653,12 @@ def mask_nms(
         mask_i = binary_masks_flat[i]
         label_i = cls_labels[i]
 
-        # Comparer à toutes les autres instances restantes
+        # Compare with all remaining lower-scored instances
         rest = torch.arange(i + 1, N, device=scores.device)
         mask_rest = binary_masks_flat[rest]
         label_rest = cls_labels[rest]
 
-        # Filtrer par classe si class_wise=True
+        # Filter by class if class_wise=True
         if class_wise:
             same_class = label_rest == label_i
             if same_class.sum() == 0:
@@ -668,7 +667,7 @@ def mask_nms(
             mask_rest_filtered = mask_rest[same_class]
             area_rest_filtered = mask_area[rest[same_class]]
         else:
-            # Comparer avec toutes les instances
+            # Compare with all instances
             indices_to_compare = rest
             mask_rest_filtered = mask_rest
             area_rest_filtered = mask_area[rest]
@@ -678,7 +677,7 @@ def mask_nms(
         union = area_i + area_rest_filtered - inter
         iou = inter / (union + 1e-6)
 
-        # Marque comme supprimé si IoU > seuil
+        # Mark as suppressed if IoU > threshold
         suppressed_idx = indices_to_compare[iou > iou_threshold]
         suppressed[suppressed_idx] = True
 
@@ -695,7 +694,7 @@ def soft_mask_nms(
     seg_preds,
     binary_masks,
     cls_factors,
-    method="gaussian",  # ou "linear"
+    method="gaussian",  # or "linear"
     sigma=0.5,
     iou_threshold=0.5,
     min_score=0.001,
@@ -703,30 +702,30 @@ def soft_mask_nms(
     class_wise=True,
 ):
     """
-    Soft-NMS pour des masques binaires.
+    Soft-NMS for binary masks.
 
     Args:
-        cls_labels (Tensor): [N] étiquettes de classe
+        cls_labels (Tensor): [N] class labels
         scores (Tensor): [N] scores
-        seg_preds (Tensor): [N, H, W] masques prédits
-        binary_masks (Tensor): [N, H, W] masques binaires
+        seg_preds (Tensor): [N, H, W] predicted masks
+        binary_masks (Tensor): [N, H, W] binary masks
         cls_factors (Tensor): [N] class factors
-        method (str): 'linear' ou 'gaussian' pour la décroissance
-        sigma (float): paramètre du mode 'gaussian'
-        iou_threshold (float): seuil utilisé en mode 'linear'
-        min_score (float): score minimal en dessous duquel on ignore l'instance
-        post_nms_k (int): nombre maximal d'instances à conserver
-        class_wise (bool): Si True, ne compare que les instances de la même classe.
-                          Si False, compare toutes les instances peu importe la classe.
+        method (str): 'linear' or 'gaussian' decay
+        sigma (float): parameter for 'gaussian' mode
+        iou_threshold (float): threshold used in 'linear' mode
+        min_score (float): minimum score below which an instance is ignored
+        post_nms_k (int): maximum number of instances to keep
+        class_wise (bool): If True, only compares instances of the same class.
+                          If False, compares all instances regardless of class.
 
     Returns:
-        seg_preds, scores, cls_labels, cls_factors (après Soft-NMS)
+        seg_preds, scores, cls_labels, cls_factors (after Soft-NMS)
     """
     N = scores.shape[0]
     if N == 0:
         return seg_preds, scores, cls_labels, cls_factors
 
-    # Tri initial par score
+    # Initial sort by score
     indices = torch.argsort(scores, descending=True)
     scores = scores[indices]
     seg_preds = seg_preds[indices]
@@ -743,18 +742,18 @@ def soft_mask_nms(
         if scores[i] < min_score:
             continue
 
-        # Conserver l'instance i
+        # Keep instance i
         keep.append(i)
         mask_i = binary_masks_flat[i]
         area_i = mask_area[i]
         label_i = cls_labels[i]
 
         for j in range(i + 1, N):
-            # Vérifier la classe si class_wise=True
+            # Check class if class_wise=True
             if class_wise and cls_labels[j] != label_i:
                 continue
 
-            # Vérifier le score minimum
+            # Check minimum score
             if scores[j] < min_score:
                 continue
 
@@ -765,7 +764,7 @@ def soft_mask_nms(
             union = area_i + area_j - inter
             iou = inter / (union + 1e-6)
 
-            # Appliquer la décroissance
+            # Apply decay
             if method == "linear":
                 if iou > iou_threshold:
                     decay = 1.0 - iou
@@ -774,7 +773,7 @@ def soft_mask_nms(
             elif method == "gaussian":
                 decay = torch.exp(-(iou**2) / sigma)
             else:
-                raise ValueError("Méthode inconnue pour Soft-NMS : {}".format(method))
+                raise ValueError("Unknown method for Soft-NMS: {}".format(method))
 
             scores[j] *= decay
 
@@ -802,7 +801,7 @@ def compute_masks(
     scale_by_mask_confidence=True,
     use_binary_masks=False,
     nms_mode="greedy",
-    use_geom=True
+    use_geom = True
 ):
     """
     Compute instance masks, scores, class labels, and densities for each image in a batch using PyTorch tensors.
@@ -873,8 +872,7 @@ def compute_masks(
         assert mask_feat.shape[0] == kernel_depth, "Mask feature channels must match kernel depth"
         seg_preds = torch.nn.functional.conv2d(mask_feat, kernel_preds, stride=1, padding="same")
         seg_preds = torch.sigmoid(seg_preds)
-        if npos > 1:
-            seg_preds = seg_preds.squeeze(0)  # [P, H, W]
+        # seg_preds: [P, H, W] (F.conv2d with 3D input returns 3D output)
         binary_masks = (seg_preds >= mask_threshold).float()  # [P, H, W]
         mask_sum = binary_masks.view(binary_masks.size(0), -1).sum(dim=1)  # [P]
         # scale the category score by mask confidence
@@ -922,7 +920,7 @@ def compute_masks(
                 seg_preds,
                 binary_masks,
                 cls_factors_pos,
-                method="gaussian",  # ou "linear"
+                method="gaussian",  # or "linear"
                 sigma=sigma_nms,
                 iou_threshold=nms_threshold,
                 min_score=cls_threshold,

@@ -18,9 +18,9 @@ class Config:
         backbone : str, optional
             Name of the backbone architecture (default: "Resnext").
         backbone_source : str, optional
-            Source library for the backbone (default: "torchvision").
+            Source library for the backbone (default: "local").
         backbone_feature_nodes : dict, optional
-            Mapping of backbone stages to feature node names (default: {"stages.0": "C2", ...}).
+            Mapping of backbone stage indices to FPN node names (default: {"ops.2": "C2", "ops.6": "C3", ...}).
         ncls : int, optional
             Number of classes (default: 1).
         imshape : tuple, optional
@@ -140,7 +140,7 @@ class Config:
         # tagets allocation
         self.scale_ranges = [[1, 96], [48, 192], [96, 384], [192, 768], [384, 2048]]  # if P2 level is stride 4
         self.offset_factor = 0.25
-        self.use_geom=True
+        self.use_geom = True
 
         # Update defaults parameters with kwargs
         for k, v in kwargs.items():
@@ -156,6 +156,11 @@ class Config:
         return s
 
     def save(self, filename):
+        """Serialize the config to a JSON file.
+
+        Args:
+            filename: Output path for the JSON config file.
+        """
 
         # data = {k:v for k, v in self.__dict__.items()}
 
