@@ -57,28 +57,32 @@ model.load_state_dict(state_dict, strict=False)
 
 ### Inference
 
-A forward pass with a [1, 3, H, W] image returns a dictionary:
+A forward pass with a [1, 3, H, W] image returns a list of dictionaries (one per batch item):
 ```python
-{
-  "masks": seg_preds,   # [N, H_mask, W_mask]
-  "scores": scores,     # [N]
-  "cls_labels": cls_ids,# [N]
-  "masses": masses      # [N]
-}
+[
+  {
+    "masks": seg_preds,        # [N, H_mask, W_mask]
+    "scores": scores,          # [N]
+    "cls_labels": cls_ids,     # [N]
+    "masses": masses,          # [N]
+    "geom_factors": geom_fac,  # [N]
+    "class_factors": cls_fac   # [N]
+  }
+]
 ```
 
-Model call signature:
+Model call signature (defaults shown):
 
 ```python
 results = model(
     x,                  # [B, 3, H, W]
     training=False,
     cls_threshold=0.5,
-    nms_threshold=0.3,
+    nms_threshold=0.5,
     mask_threshold=0.5,
     max_detections=768,
-    scale_by_mask_scores=False,
-    min_area=32,
+    scale_by_mask_scores=True,
+    min_area=0,
     nms_mode="greedy"   # "greedy", "soft", or "matrix"
 )
 ```
@@ -86,10 +90,10 @@ results = model(
 Predicted masks may overlap. To obtain a labeled image (non-overlapping instance map):
 
 ```python
-processed_masks = ramses2.decode_predictions(results["masks"], 
-                                             results["scores"], 
+processed_masks = ramses2.decode_predictions(results[0]["masks"], 
+                                             results[0]["scores"], 
                                              threshold=0.5, 
-                                             by_mask_scores=False)
+                                             by_mask_scores=True)
 ```
 
 Two functions can be used to automate predictions on a folder of images: use `predict()` to run inference on each image and `stream_predict()` to process image streams where objects may be split across consecutive frames. The function identifies truncated objects, reconstructs complete instances using overlap regions, and saves overlap images to the OUTPUT_FOLDER.
@@ -179,7 +183,7 @@ Or customize parameters (see `model/config.py` for all options). Example paramet
         "FPN_output_upscaling": False, # Upscale the mask_output_level
         # inference
         "use_binary_masks": True,
-        "sigma_nms": 0.5,# only for MarixNMS
+        "sigma_nms": 0.5,  # only for MatrixNMS
         "min_area": 0,
         # target allocation
         "scale_ranges": [[1, 128], [64, 256], [128, 512], [256, 3072]],
@@ -217,7 +221,9 @@ Dataset/
 `annotations.csv` must include at least:
 
 - label: mask object ID
+- folder: path to the directory containing `images/` and `labels/`
 - baseimg: image basename (e.g. "IM0001")
+- area: instance area (pixels)
 - x0, y0, x1, y1: bounding box coordinates (pixels)
 - class: object class
 - res: resolution (pixels/mm)
