@@ -8,11 +8,13 @@ from ..core import norm
 
 def get_class(name: str, extra_modules=None):
     """
-    Look up a class by name in torch.nn, then in a list of additional modules.
+    Look up a class by name in torch.nn, then in the custom core ``norm`` module,
+    then in any additional provided modules.
 
     Args:
-        name: Class name (e.g., "ReLU" or "GroupNormCustom").
-        extra_modules: Optional list of modules to search if not found in torch.nn.
+        name: Class name (e.g., "GroupNorm", "LayerNorm2d", "RMSNorm2d").
+        extra_modules: Optional list of additional modules to search after
+            torch.nn and the core ``norm`` module.
 
     Returns:
         type: The matching Python class.
@@ -23,16 +25,12 @@ def get_class(name: str, extra_modules=None):
     if extra_modules is None:
         extra_modules = []
 
-    # Try torch.nn first
-    if hasattr(nn, name):
-        return getattr(nn, name)
-
-    # Then search the provided modules
-    for module in extra_modules:
+    # torch.nn first, then the custom core ``norm`` module, then any extras.
+    for module in (nn, norm, *extra_modules):
         if hasattr(module, name):
             return getattr(module, name)
 
-    raise ValueError(f"Class '{name}' not found in torch.nn or in the provided modules {extra_modules}.")
+    raise ValueError(f"Class '{name}' not found in torch.nn, core.norm, or the provided modules {extra_modules}.")
 
 
 def make_tuple(value, n, fill_value=None):
