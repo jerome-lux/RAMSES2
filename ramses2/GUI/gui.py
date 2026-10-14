@@ -19,6 +19,7 @@ import configparser
 import datetime
 import json
 import os
+import platform
 from pathlib import Path
 
 import numpy as np
@@ -62,6 +63,33 @@ COLORS: dict[str, str] = {
 
 #: Location of the persisted configuration file.
 CONFIG_PATH: Path = Path.home() / ".config" / "ramses" / "ramses.ini"
+
+def _select_app_font() -> str:
+    """Return the UI font family that renders with anti-aliasing on the current OS.
+
+    Each platform is mapped to its native, well-hinted UI typeface so that Tk
+    produces clean, subpixel-antialiased text:
+
+    * macOS   -> ``Helvetica Neue`` (modern system UI font, CoreText anti-aliasing)
+    * Windows -> ``Segoe UI``       (native UI font, ClearType subpixel anti-aliasing)
+    * Linux   -> ``DejaVu Sans``    (default well-hinted TrueType, X anti-aliasing)
+
+    The previous hard-coded "Helvetica" name was not a real, well-hinted font on
+    Linux and was silently substituted, causing the jagged text the user reported.
+
+    Returns:
+        The font-family name to use throughout the GUI.
+    """
+    system = platform.system()
+    if system == "Darwin":
+        return "Helvetica Neue"
+    if system == "Windows":
+        return "Segoe UI"
+    return "DejaVu Sans"
+
+
+#: Application-wide font family, chosen per OS (see :func:`_select_app_font`).
+APP_FONT: str = _select_app_font()
 
 
 class ConfigHandler:
@@ -322,11 +350,11 @@ class ramsesGUI:
     def _setup_style(self) -> None:
         """Configure the ttk theme and the fonts used across the interface."""
         style = ThemedStyle(self.root)
-        style.configure(".", font=("Helvetica", 12))
+        style.configure(".", font=(APP_FONT, 12))
         style.theme_use("scidblue")
         tree_style = ttk.Style(self.root)
-        tree_style.configure("My.Treeview", font=("Helvetica", 12))
-        tree_style.configure("My.Treeview.Heading", background="grey", font=("Helvetica", 12, "bold"))
+        tree_style.configure("My.Treeview", font=(APP_FONT, 12))
+        tree_style.configure("My.Treeview.Heading", background="grey", font=(APP_FONT, 12, "bold"))
 
     def _build_menubar(self) -> None:
         """Create the application menu bar (File / Configure)."""
@@ -444,14 +472,30 @@ class ramsesGUI:
 
     def _build_classes_tab(self) -> None:
         """Build the class-legend tab from the local ``classes.json`` file."""
-        self.class_description = tk.Text(master=self.classes_tab, bg="white", font=("Helvetica", 18), spacing1=7, spacing2=7)
+        self.class_description = tk.Text(
+            master=self.classes_tab,
+            bg="white",
+            font=(APP_FONT, 14),
+            spacing1=5,
+            spacing2=5,
+            padx=10,
+            pady=10,
+            wrap=tk.WORD,
+        )
         self.class_description.pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+
+        # Tag styling: bold class names, normal description text.
+        self.class_description.tag_configure("class_name", font=(APP_FONT, 14, "bold"))
+        self.class_description.tag_configure("class_desc", font=(APP_FONT, 14))
 
         classes_path = os.path.join(os.path.realpath(os.path.dirname(__file__)), "classes.json")
         with open(classes_path, "r", encoding="utf-8") as jsonfile:
             self.classes = json.load(jsonfile)
-        for classname, classdata in self.classes.items():
-            self.class_description.insert(tk.END, f"{classname}: {classdata['description']}\n")
+        # Display classes alphabetically by name rather than in their ID order.
+        for classname, classdata in sorted(self.classes.items()):
+            self.class_description.insert(tk.END, f"{classname}: ", ("class_name",))
+            self.class_description.insert(tk.END, classdata["description"], ("class_desc",))
+            self.class_description.insert(tk.END, "\n")
         self.class_description.config(state=tk.DISABLED)
 
     # ------------------------------------------------------------------
@@ -575,7 +619,7 @@ class ramsesGUI:
         popup.title("Processing")
         popup.attributes("-topmost", "true")
         progress_text = tk.StringVar(value="Detecting aggregates...")
-        ttk.Label(popup, textvariable=progress_text, font=("Helvetica", 16, "bold")).pack(pady=15, padx=15)
+        ttk.Label(popup, textvariable=progress_text, font=(APP_FONT, 16, "bold")).pack(pady=15, padx=15)
         self.root.update()
 
         self.detection_dir = os.path.join(self.input_dir, "detection-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
@@ -656,7 +700,7 @@ class ramsesGUI:
             self.granulometry_table.column(col, width=(50 if i == 0 else 25), stretch=True, anchor="e")
         self.granulometry_table.insert("", tk.END, values=header, tags=("header",))
         self.granulometry_table.insert("", tk.END, values=values)
-        self.granulometry_table.tag_configure("header", background="lightgrey", font=("Helvetica", 12, "bold"))
+        self.granulometry_table.tag_configure("header", background="lightgrey", font=(APP_FONT, 12, "bold"))
         self.root.update()
 
     def plot_classification(self) -> None:
@@ -728,7 +772,7 @@ class ramsesGUI:
         self.classification_table.insert("", tk.END, values=fraction_row)
         self.classification_table.insert("", tk.END, values=mass_row, tags=("alt",))
         self.classification_table.insert("", tk.END, values=count_row, tags=("alt",))
-        self.classification_table.tag_configure("header", background="lightgrey", font=("Helvetica", 12, "bold"))
+        self.classification_table.tag_configure("header", background="lightgrey", font=(APP_FONT, 12, "bold"))
         self.classification_table.tag_configure("alt", background="lightgrey")
         self.root.update()
 
