@@ -1,62 +1,62 @@
 {
     "Ra": {
         "id": 1,
-        "description": "Granulats bitumineux"
+        "description": "Asphalt / bituminous aggregates"
     },
     "Rc": {
         "id": 2,
-        "description": "Granulats béton"
+        "description": "Concrete aggregates"
     },
     "Rb01": {
         "id": 3,
-        "description": "Terre cuite"
+        "description": "Fired clay (terracotta)"
     },
     "Rb02": {
         "id": 4,
-        "description": "Carrelage, faience, etc."
+        "description": "Tiles, glazed ceramics, etc."
     },
     "Rcu01": {
         "id": 5,
-        "description": "mortier calcaire"
+        "description": "Limestone mortar"
     },
     "Ru01": {
         "id": 6,
-        "description": "Pierres calcaire"
+        "description": "Limestone (calcite) stones"
     },
     "Ru02": {
         "id": 7,
-        "description": "Pierres grises (basalte, diorite, etc.)"
+        "description": "Grey stones (basalt, diorite, etc.)"
     },
     "Ru04": {
         "id": 8,
-        "description": "Pierres concassés colorées et/ou sombres"
+        "description": "Crushed coloured and/or dark stones"
     },
     "Ru05": {
         "id": 9,
-        "description": "Granulats alluvionnaires"
+        "description": "Alluvial aggregates"
     },
     "Ru06": {
         "id": 10,
-        "description": "Ardoise"
+        "description": "Slate"
     },
     "X01": {
         "id": 11,
-        "description": "Bois"
+        "description": "Wood"
     },
     "Coin": {
         "id": 12,
-        "description": "Pièce de 5 centimes"
+        "description": "5-cent coin (size reference)"
     },
     "X02": {
         "id": 13,
-        "description": "Plastique"
+        "description": "Plastic"
     },
     "X03": {
         "id": 14,
-        "description": "Aciers"
+        "description": "Steel / ferrous metals"
     },
     "Rg": {
         "id": 15,
-        "description": "Verre"
+        "description": "Glass"
     }
 }
