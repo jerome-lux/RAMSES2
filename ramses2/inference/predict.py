@@ -853,12 +853,19 @@ def stream_predict(
 
                 o_imgname = "OVERLAP_{}-{}.jpg".format(os.path.splitext(prev_imgname)[0], os.path.splitext(imgname)[0])
                 print("Processing overlapping image {}...".format(o_imgname), end="")
-                # Save the overlap image for reference only (do NOT re-read for inference)
-                Image.fromarray(np.around(overlap_image * 255).astype(np.uint8)).save(
-                    os.path.join(OVERLAPPING_IMGS_DIR, o_imgname), quality=95
-                )
+                # save the overlap image
+                o_PILimg = Image.fromarray(np.around(overlap_image * 255).astype(np.uint8))
+                o_PILimg.save(os.path.join(OVERLAPPING_IMGS_DIR, o_imgname), quality=95)
 
-                # Get predictions on the overlap image (in-memory float array, no JPEG round-trip)
+                # Re-read the saved JPEG and use it as the inference input.
+                # This round-trip is REQUIRED, not just a save: the model scores the
+                # reloaded band markedly higher than the raw in-memory array (e.g. 0.9 vs
+                # 0.2 on the same content), so overlap detection depends on it.
+                PILimg = Image.open(os.path.join(OVERLAPPING_IMGS_DIR, o_imgname))
+                overlap_image = np.array(PILimg) / 255.0
+                overlap_image = overlap_image.astype(np.float32)
+
+                # Get predictions on the overlap image
                 (
                     o_region_properties,
                     o_resized_labeled_image,
@@ -867,7 +874,7 @@ def stream_predict(
                     o_pred_scores,
                     o_mask_stride,
                 ) = single_image_prediction(
-                    overlap_image.astype(np.float32),
+                    overlap_image,
                     model,
                     thresholds=thresholds,
                     max_detections=max_detections,
@@ -877,6 +884,13 @@ def stream_predict(
                 )
                 if o_pred_cls_ids is None:
                     print("No instance detected !")
+                    # The "advance prev to current" step (end of loop) must still run,
+                    # otherwise prev_imgname/prev_filtered_image/prev_bottom_boxes stay
+                    # frozen and every later overlap glues the same previous image to a
+                    # non-consecutive current image.
+                    prev_bottom_boxes = pred_boxes[bottom_indexes]
+                    prev_filtered_image = filtered_image
+                    prev_imgname = imgname
                     continue
 
                 print(f"{torch.numel(o_pred_cls_ids)} instances detected")
