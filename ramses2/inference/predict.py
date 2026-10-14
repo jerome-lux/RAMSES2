@@ -1,30 +1,25 @@
 import os
 import json
+import logging
 from pathlib import Path
-import datetime
-from copy import deepcopy
 from PIL import Image
 import pandas
 import numpy as np
-import scipy
 import skimage as sk
 import cv2
 from skimage.color import label2rgb
 from skimage.measure import find_contours, approximate_polygon, regionprops
-from ..utils.visualization import _COLORS, plot_instances
+from ..utils.visualization import _COLORS
 from ..utils import crop_to_aspect_ratio, pad_to_aspect_ratio, decode_predictions, draw_instances, relabel_and_filter
 from ..model import Config, RAMSESModel
 from scipy.ndimage import distance_transform_edt
 import torch
-import torchvision.transforms.functional as F
 
-
-now = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+logger = logging.getLogger(__name__)
 
 VALID_IMAGE_FORMATS = [".jpg", ".png", ".tif", ".bmp", ".jpeg"]
 MINAREA = 16
 BGCOLOR = (90, 140, 200)
-deltaL = 10
 
 
 def box_to_coco(boxes):
@@ -58,9 +53,9 @@ def binary_mask_to_polygon(binary_mask, level=0.5, tolerance=0, x_offset=0, y_of
         if len(contour) < 3:
             print("Polyshape must have at least 2 points. Skipping")
             continue
-        contour = np.flip(contour, axis=1)
-        contour[..., 0] += y_offset
-        contour[..., 1] += x_offset
+        contour = np.flip(contour, axis=1)  # (row, col) → (x, y)
+        contour[..., 0] += x_offset
+        contour[..., 1] += y_offset
         seg = contour.ravel().tolist()
         # after padding and subtracting 1 we may get -0.5 points in our segmentation
         seg = [0 if i < 0 else i for i in seg]
@@ -69,6 +64,7 @@ def binary_mask_to_polygon(binary_mask, level=0.5, tolerance=0, x_offset=0, y_of
     return polygons
 
 
+@torch.no_grad()
 def predict(
     output_dir,
     input_size,
@@ -81,6 +77,7 @@ def predict(
     create_coco_anns=False,
     max_detections=400,
     minarea=64,
+    scale_by_mask_scores=True,
     subdirs=False,
     save_imgs="class",
     device="cuda:0",
@@ -88,30 +85,29 @@ def predict(
 ):
     """Instance segmentation + mass estimation on an image or a series of images.
 
-    Inputs:
-    input_dir: all the images in input_dir will be processed
-    input_size: input size of the network. image will be padded/cropped and resized to input_shape
-    output_dir: where to put teh results
-    model: pytorch model
-    resolution: res of the input images [MUST be the same for all images!]
-    thresholds: a list of thresolds: (t1, t2, t3)
-        {"score_threshold": 0.5, "seg_threshold": 0.5, "nms_threshold": 0.6}
-    crop_to_ar: wether to crop before resizing the image to input_size. If false, the image is padded.
-    subdirs [False]: if True, all images in subfolders are processed
-    max_detections: lmax number of detected instances (beware the masks tensor shape is [max_instances, Nx, Ny]
-    minarea and minsize are the min area of instances (min area of each connected part of an instance) and minsize of boxes. Useful for filtering noise.
+    Args:
+        output_dir: Directory where results are written.
+        input_size: (nx, ny) network input size. Images are cropped/padded and resized to this shape.
+        resolution: Pixel resolution of input images (pixels/mm). Must be identical for all images.
+        input_dir: Directory containing the images to process.
+        model: A RAMSESModel instance (PyTorch).
+        idx_to_cls: Mapping from 1-based class index to class name.
+        thresholds: (score_threshold, seg_threshold, nms_threshold) tuple.
+        crop_to_ar: If True, crop to input aspect ratio before resizing; otherwise pad.
+        create_coco_anns: If True, also write a COCO-format JSON annotation file.
+        max_detections: Maximum number of instances to keep per image.
+        minarea: Minimum connected-component area (pixels) to keep.
+        scale_by_mask_scores: If True, weight predicted mass by per-pixel mask scores.
+        subdirs: If True, also search for images in subdirectories.
+        save_imgs: Visualization mode – "class" (colored overlays) or "labels" (label2rgb).
+        device: Torch device string (e.g. "cuda:0").
 
-    Outputs:
-    -COCO object (dict -> saved as json)
-    -data dict (dict -> saved as csv)
+    Returns:
+        dict: Accumulated per-instance data (baseimg, label, res, class, boxes, area, mass, …).
 
-    Creates on disk:
-    - A coco file (json)
-    - A csv file containing instance boxes resolution, mass, area, class or other information (if available)
-    - label images  in output_dir/labels folder
-    - image superimposed with colored labels for vizualisation in output_dir/vizu folder (low-res images)
-    - individual instances in output_dir/crops folder
-
+    Side effects:
+        Writes annotations.csv, optional coco_annotations.json, label PNGs, and
+        visualization JPEGs into output_dir.
     """
     if create_coco_anns:
         categories = [{"id": k, "name": v, "supercategory": "RA"} for k, v in idx_to_cls.items()]
@@ -228,31 +224,28 @@ def predict(
                 }
             )
 
-        resized_image = torch.from_numpy(resized_image.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).float()
-        resized_image = resized_image.to(device)
+        resized_image = torch.from_numpy(resized_image.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).to(device)
 
         # Get network predictions
         results = model(
             resized_image,
             training=False,
             cls_threshold=thresholds[0],
-            nms_threshold=thresholds[2],  # iou threshold or cls threshold in MatrixNMX
-            mask_threshold=thresholds[1],  # threshold to apply to the masks
+            nms_threshold=thresholds[2],
+            mask_threshold=thresholds[1],
             max_detections=max_detections,
-            scale_by_mask_scores=False,
+            scale_by_mask_scores=scale_by_mask_scores,
             min_area=minarea,
             nms_mode="greedy",
-        )[
-            0
-        ]  # take the first element of the batch (because batch size = 1 here)
-        # TODO: pb si un mask est supprimé lors de decode_prediction > il faut relabeliser pour obtenir une liste d'entiers consécutifs
+        )[0]
+
         pred_masks = results["masks"].detach()  # [Npred, H, W]
         pred_masses = results["masses"].detach()  # [Npred]
         pred_cls_ids = results["cls_labels"].detach() + 1  # [Npred]
         pred_scores = results["scores"].detach()  # [Npred]
+
         # get labeled image: [H, W]
         labeled_image = decode_predictions(pred_masks, pred_scores, threshold=0.5, by_mask_scores=False)
-        pred_labels = torch.unique(labeled_image)[1:] - 1  # skipping 0
         labeled_image = labeled_image.cpu().numpy().astype(int)
 
         if pred_scores.numel() <= 0:  # No detection !
@@ -362,20 +355,7 @@ def predict(
         if create_coco_anns:
             cocoboxes = box_to_coco(boxes)
 
-            # saving coco instance data
             for i, prop in enumerate(region_properties):
-
-                box = prop["bbox"]
-
-                data["baseimg"].append(imgname)
-                data["label"].append(final_labels[i])
-                data["res"].append(resolution)
-                data["x0"].append(box[0])
-                data["x1"].append(box[2])
-                data["y0"].append(box[1])
-                data["y1"].append(box[3])
-
-                # Create COCO annotation
                 polys = binary_mask_to_polygon(
                     prop["image"],
                     level=0.5,
@@ -386,12 +366,12 @@ def predict(
                 coco["annotations"].append(
                     {
                         "segmentation": polys,
-                        "area": int(data["area"][i]),
+                        "area": int(prop["area"] * inv_ratio**2),
                         "iscrowd": 0,
                         "image_id": img_counter,
                         "bbox": [int(b) for b in cocoboxes[i]],
                         "category_id": int(pred_cls_ids[i]),
-                        "id": i,
+                        "id": len(coco["annotations"]),
                     }
                 )
 
@@ -412,82 +392,6 @@ def predict(
     df.to_csv(os.path.join(OUTPUT_DIR, "annotations.csv"), na_rep="nan", header=True)
 
     return data
-
-
-# def single_image_prediction(
-#     input_image,
-#     model,
-#     thresholds=(0.5, 0.5, 0.5),
-#     max_detections=400,
-#     minarea=MINAREA,
-#     weight_by_scores=False,
-#     device="cuda:0",
-# ):
-#     nx, ny = input_image.shape[:2]  # Note: image can be padded or cropped
-#     input_tensor = torch.from_numpy(input_image.astype(np.float32)).permute(2, 0, 1).unsqueeze(0).float()
-#     input_tensor = input_tensor.to(device)
-
-#     results = model(
-#         input_tensor,
-#         training=False,
-#         cls_threshold=thresholds[0],
-#         nms_threshold=thresholds[2],  # iou threshold or cls threshold in MatrixNMX
-#         mask_threshold=thresholds[1],  # threshold to apply to the masks
-#         max_detections=max_detections,
-#         scale_by_mask_scores=weight_by_scores,
-#         min_area=minarea,
-#         nms_mode="greedy",
-#     )[
-#         0
-#     ]  # take the first element of the batch (because batch size = 1 here)
-
-#     pred_masks = results["masks"].detach()  # [Npred, H, W]
-#     pred_masses = results["masses"].detach()  # [Npred]
-#     pred_cls_ids = results["cls_labels"].detach() + 1  # [Npred]
-#     pred_scores = results["scores"].detach()  # [Npred]
-
-#     # get labeled image: [H, W]
-#     labeled_image = decode_predictions(pred_masks, pred_scores, threshold=0.5, by_mask_scores=False)
-#     labeled_image = labeled_image.cpu().numpy().astype(int)
-#     mask_stride = nx // labeled_image.shape[0]
-#     # Resize to input size (not fullsize because it's too big!) and delete padding
-#     resized_labeled_image = sk.transform.resize(labeled_image, (nx, ny), order=0)
-
-#     final_labels = np.unique(resized_labeled_image)[1:]
-#     if final_labels.size == 0:
-#         return None, None, None, None, None, None
-#     final_indexes = final_labels - 1
-#     # final_labels may be non consecutive or some slices may be empty -> all pixel values are < seg_threshold
-#     if final_labels.size != torch.numel(pred_cls_ids):
-#         pred_scores = pred_scores[final_indexes]
-#         pred_cls_ids = pred_cls_ids[final_indexes]
-#         pred_masses = pred_masses[final_indexes]
-#     if np.max(final_indexes) > torch.numel(pred_cls_ids):
-#         resized_labeled_image, final_labels, (pred_scores, pred_cls_ids, pred_masses) = relabel_and_filter(
-#             torch.from_numpy(resized_labeled_image),
-#             torch.from_numpy(final_labels),
-#             pred_scores,
-#             pred_cls_ids,
-#             pred_masses,
-#         )
-#         resized_labeled_image = resized_labeled_image.numpy()
-#         final_labels = final_labels.numpy()
-
-#     if torch.numel(pred_scores) <= 0:  # No detection !
-#         return None, None, None, None, None, None
-
-#     region_properties = regionprops(
-#         resized_labeled_image, extra_properties=(max_inscribed_radius_func, min_feret_diameter_func)
-#     )
-
-#     return (
-#         region_properties,
-#         resized_labeled_image,
-#         pred_cls_ids.cpu(),
-#         pred_masses.cpu(),
-#         pred_scores.cpu(),
-#         mask_stride,
-#     )
 
 
 @torch.no_grad()
@@ -939,31 +843,31 @@ def stream_predict(
                         0,
                     )
 
+                # Capture pre-padding height for correct mass scaling
+                overlap_fullsize_nx = overlap_image.shape[0]
+
                 # resize the image to the network's input size using padding. New shape should be equal to (nx, ny)
                 overlap_image, o_padding = pad_to_aspect_ratio((nx, ny), overlap_image)
                 if overlap_image.shape[0] != nx or overlap_image.shape[1] != ny:
-                    print("Warning, overlap image has not the right shape after padding:", overlap_image.shape)
+                    logger.warning("Overlap image has not the right shape after padding: %s", overlap_image.shape)
 
                 o_imgname = "OVERLAP_{}-{}.jpg".format(os.path.splitext(prev_imgname)[0], os.path.splitext(imgname)[0])
                 print("Processing overlapping image {}...".format(o_imgname), end="")
-                # save the overlap image (maybe we should upscale to fullsize here)
-                o_PILimg = Image.fromarray(np.around(overlap_image * 255).astype(np.uint8))
-                o_PILimg.save(os.path.join(OVERLAPPING_IMGS_DIR, o_imgname), quality=95)
+                # Save the overlap image for reference only (do NOT re-read for inference)
+                Image.fromarray(np.around(overlap_image * 255).astype(np.uint8)).save(
+                    os.path.join(OVERLAPPING_IMGS_DIR, o_imgname), quality=95
+                )
 
-                PILimg = Image.open(os.path.join(OVERLAPPING_IMGS_DIR, o_imgname))
-                overlap_image = np.array(PILimg) / 255.0
-                overlap_image = overlap_image.astype(np.float32)
-
-                # Get predictions on the overlap image
+                # Get predictions on the overlap image (in-memory float array, no JPEG round-trip)
                 (
                     o_region_properties,
                     o_resized_labeled_image,
                     o_pred_cls_ids,
                     o_pred_masses,
                     o_pred_scores,
-                    mask_stride,
+                    o_mask_stride,
                 ) = single_image_prediction(
-                    overlap_image,
+                    overlap_image.astype(np.float32),
                     model,
                     thresholds=thresholds,
                     max_detections=max_detections,
@@ -981,8 +885,6 @@ def stream_predict(
                 o_labelname = "{}.png".format(os.path.splitext(o_imgname)[0])
                 Image.fromarray(o_resized_labeled_image.astype(np.uint16)).save(os.path.join(LABELS_DIR, o_labelname))
 
-                # Note: the overlap images are saved without resizing, so the properties are not scaled
-                # The resolution is therefore the one of the current image
                 o_pred_boxes = np.array([prop["bbox"] for prop in o_region_properties])
                 o_labels = np.array([prop["label"] for prop in o_region_properties])
                 area = np.array([prop["area"] for prop in o_region_properties])
@@ -992,14 +894,15 @@ def stream_predict(
                 min_feret_diameter = np.array([prop["min_feret_diameter_func"] for prop in o_region_properties])
                 max_inscribed_radius = np.array([prop["max_inscribed_radius_func"] for prop in o_region_properties])
 
-                res_ratio = (nx // mask_stride) / fullsize_nx
-                scaling = (10 * resolution * res_ratio) ** 2
-                masses = o_pred_masses / scaling
+                # Use the overlap image's own pre-padding size for mass scaling
+                o_res_ratio = (nx // o_mask_stride) / overlap_fullsize_nx
+                o_scaling = (10 * resolution * o_res_ratio) ** 2
+                masses = o_pred_masses / o_scaling
                 classes = o_pred_cls_ids.tolist()
 
                 data["baseimg"].extend([o_imgname] * o_labels.size)
                 data["label"].extend(o_labels.tolist())
-                data["res"].extend([resolution * nx / fullsize_nx] * o_labels.size)
+                data["res"].extend([resolution * nx / overlap_fullsize_nx] * o_labels.size)
                 data["x0"].extend(o_pred_boxes[:, 0].tolist())
                 data["x1"].extend(o_pred_boxes[:, 2].tolist())
                 data["y0"].extend(o_pred_boxes[:, 1].tolist())
@@ -1015,7 +918,7 @@ def stream_predict(
                 data["min_feret_diameter"].extend(min_feret_diameter.tolist())
                 data["max_inscribed_radius"].extend(max_inscribed_radius.tolist())
 
-                if save_imgs == 'instances':
+                if save_imgs == "instance":
                     vizuname = "VIZU-{}.jpg".format(os.path.splitext(o_imgname)[0])
                     bd = sk.segmentation.find_boundaries(
                         o_resized_labeled_image, connectivity=2, mode="inner", background=0
@@ -1063,31 +966,34 @@ def stream_predict(
         json.dump(config, jsonconfig)
 
     df = pandas.DataFrame().from_dict(data)
-    # df = df.set_index("filename")
     df.to_csv(os.path.join(OUTPUT_DIR, "annotations.csv"), na_rep="nan", header=True, index=False)
 
-    # return data dict
     return data
 
 
 def max_inscribed_radius_func(mask):
+    """Compute the radius of the largest inscribed circle in a binary region.
 
+    Args:
+        mask: 2D boolean array from ``skimage.measure.regionprops``.
+
+    Returns:
+        float: Maximum inscribed radius (pixels).
+    """
     return distance_transform_edt(np.pad(mask, 1)).max()
 
 
 def min_feret_diameter_func(mask):
-    """
-    Calcule la boîte englobante orientée (Rotated Bounding Box)
-    en utilisant les coordonnées des pixels de la région.
+    """Compute the minimum Feret diameter (width of the rotated bounding box).
 
-    Return width of the rotated box
+    Args:
+        mask: 2D boolean array from ``skimage.measure.regionprops``.
+
+    Returns:
+        float: Shortest side of the minimum-area bounding rectangle (pixels).
     """
-    # props.coords contient les coordonnées (ligne, colonne) des pixels
-    # On doit les inverser en (colonne, ligne) pour OpenCV (x, y)
-    # coords_xy = np.fliplr(mask.coords)
-    contours, n = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0.0
     contour = max(contours, key=cv2.contourArea)
-    # minAreaRect nécessite un numpy.array de points
-    W = min(cv2.minAreaRect(contour)[1])
-
-    return W
+    return min(cv2.minAreaRect(contour)[1])
